@@ -83,11 +83,12 @@ all hit the 30-call limit.
 |---|---|---|---|---|
 | One call | 4/10 | 1.6 | about 1,700 | 15 s |
 | Checklist | 5/10 | 2.7 | about 5,300 | 17 s |
-| Ladder | 8 of 9 so far | 11.1 | | 49 s |
+| Ladder | 9/10 | 10.9 | about 57,000 | 60 s |
 | Pi | 10/10 | 11.3 | about 54,000 | 68 s |
 
 The small model makes more wrong first edits, so it leans on the loop: Pi's trial and error suits it, and the
-ladder reaches its last rung more often there.
+ladder reaches its last rung more often there (6 of its 9 passes came from Pi's loop). On the 4B, the ladder
+adds little over plain Pi; on the 12B it is both more accurate and about 24 times leaner.
 
 ## Requirements (planned)
 
