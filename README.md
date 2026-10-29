@@ -34,12 +34,21 @@ question, a chat) goes to Pi as usual. The commands are there if you'd rather be
 
 | Command | What it's for |
 |---|---|
-| `/research` | Answer a question ("is there a library for X?", "how do others do Y?") from GitHub and the web, in a separate context. You get a short answer with links. |
-| `/plan` | Turn "I want to build X", or a change to an existing project, into a short spec and a list of small tasks, each with a test that defines done. |
-| `/build` | Work through the plan one task at a time: write the test, make it pass, run the suite, commit. Stops and explains if a task gets stuck; resumes where it left off. |
+| `/add` | Add new code (a function, an option, an endpoint) together with a test that proves it works. |
+| `/edit` | Change existing code as described, with file-type checks (Python compiles, AppleScript recompiles on macOS). |
 | `/fix` | Make a failing test pass, or fix a described bug. |
-| `/edit` | Change one file as described, with file-type checks (Python compiles, AppleScript recompiles on macOS). |
+| `/explain` | Explain code in this project, with every file and line reference checked. |
+| `/test` | Write tests for existing code. They must pass on today's code; a failure that looks like a bug is reported, never papered over. |
+| `/doc` | Add comments and docstrings without touching the code, or write a project overview / update README sections from summaries of every file. |
 | `/review` | Review your current changes, one hunk at a time, and list findings with file and line. |
+| `/commit` | Write a commit message from your changes and commit after you confirm. |
+| `/ask` | Answer a general question in one call, without touching the project. |
+| `/research` | Answer "is there a library for X?" or "how do others do Y?" from GitHub and the web, in a separate context, with links. |
+| `/plan` | Turn "I want to build X" into a short spec and a list of small tasks, each with a test. |
+| `/build` | Work through the plan one task at a time: write the test, make it pass, run the suite, commit. |
+
+One command per kind of request developers make most often, based on published studies of real assistant use. After
+any edit, your project's own formatter and linter run if you have them set up.
 
 ## How
 
