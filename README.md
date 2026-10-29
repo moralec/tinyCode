@@ -15,6 +15,12 @@ conversation is most of the cost and most of the wait.
 tinyCode moves the routine part of the work from the model to code, and gives the model only what each step needs.
 Big jobs become a series of small ones, each in a fresh context.
 
+To decide what to build, we mapped the activities developers most often ask coding assistants and CLI agents for,
+from published studies of real use (tens of thousands of real chat messages, plus developer surveys): changing
+code, fixing bugs, explaining code, writing tests, documenting, planning, adding new code, committing, and general
+questions. Each one got its own workflow, designed for a small context: code gathers exactly what that kind of job
+needs, the model makes one or two narrow calls, and code checks the result.
+
 ## What
 
 You work in Pi exactly as you would with any coding assistant: type what you want in plain language. Behind the
@@ -47,8 +53,8 @@ question, a chat) goes to Pi as usual. The commands are there if you'd rather be
 | `/plan` | Turn "I want to build X" into a short spec and a list of small tasks, each with a test. |
 | `/build` | Work through the plan one task at a time: write the test, make it pass, run the suite, commit. |
 
-One command per kind of request developers make most often, based on published studies of real assistant use. After
-any edit, your project's own formatter and linter run if you have them set up.
+One command per common activity, each optimised for a low-context setup. After any edit, your project's own
+formatter and linter run if you have them set up.
 
 ## How
 
