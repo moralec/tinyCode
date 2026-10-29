@@ -35,7 +35,7 @@ Small sample; the release will publish the full method.
 
 - [Pi](https://github.com/earendil-works/pi) 1.4 or later, Node 22.19 or later (the installer can install a private copy)
 - An OpenAI-compatible endpoint, such as llama.cpp's `llama-server`
-- macOS or Linux
+- macOS, Linux or Windows: the code is written to be cross-platform, with an installer for each (`install.sh`, `install.ps1`). Windows support will be claimed once automated tests pass on it.
 
 ## Licence
 
