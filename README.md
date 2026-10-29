@@ -15,6 +15,21 @@ conversation is most of the cost and most of the wait.
 tinyCode moves the routine part of the work from the model to code, and gives the model only what each step needs.
 Big jobs become a series of small ones, each in a fresh context.
 
+## Just ask
+
+You work in Pi exactly as you would with any coding assistant: type what you want in plain language. Behind the
+scenes, tinyCode recognises the kind of job and runs it its own way, with code doing the routine work and the model
+doing only the thinking.
+
+```
+> the monthly report puts every day in its own bucket, can you fix it?
+  fix: monthly report groups by day instead of month — run it? [y/N] y
+  ✓ fixed in orders/dates.py (2 calls, 17 s) — tests pass
+```
+
+It always says in one line what it understood and waits for your yes. Anything that isn't a coding job (a
+question, a chat) goes to Pi as usual. The commands below are there if you'd rather be explicit.
+
 ## What it does
 
 | Command | What it's for |
@@ -25,9 +40,6 @@ Big jobs become a series of small ones, each in a fresh context.
 | `/fix` | Make a failing test pass, or fix a described bug. |
 | `/edit` | Change one file as described, with file-type checks (Python compiles, AppleScript recompiles on macOS). |
 | `/review` | Review your current changes, one hunk at a time, and list findings with file and line. |
-
-You don't have to remember the commands. Ask in plain words: tinyCode says in one line what it understood
-("fix: the failing test in orders, run it?") and runs after you confirm. Anything else goes to Pi as usual.
 
 ## How it stays small
 
