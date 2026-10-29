@@ -88,6 +88,8 @@ With Qwen 3.5 4B on an 8 GB card, both pass 9–10 of 10, and most tasks need th
 Ladder learns. Setup: llama.cpp `llama-server`, temperature 0, thinking off, 30 calls or 30 minutes per task.
 A fuller benchmark (repeated runs plus a third-party task set) is coming.
 
+Pi alone against Pi with tinyCode on nine public Python exercises (Aider's polyglot benchmark), two models, updated as runs finish: [bench/RESULTS.md](bench/RESULTS.md).
+
 ## Installation
 
 You need an OpenAI-compatible endpoint (llama.cpp's `llama-server` is the one we use) and `git`. The installer sets up
