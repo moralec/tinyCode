@@ -8,20 +8,39 @@
 
 ## Why
 
-Coding agents send the model a growing conversation: every file read and every test run stays in the context and is sent again on each call. On a small model with a slow card, that is most of the cost.
+Coding agents work by trial and error: the model reads a file, runs the tests, reads another, and everything it saw
+stays in the conversation and is sent again on every call. With a small model on a modest GPU, that growing
+conversation is most of the cost and most of the wait.
 
-tinyCode moves the routine decisions from the model to code:
+tinyCode moves the routine part of the work from the model to code, and gives the model only what each step needs.
+Big jobs become a series of small ones, each in a fresh context.
 
-- **Code builds the context.** It reads the failing test, follows imports and outlines the project, then gives the model only what the step needs.
-- **One call per step where possible.** The model answers with small find-and-replace edits; code applies them and runs the tests.
-- **Branching.** Side questions run in a separate call, and only the answer, with file and line references, returns to the main conversation.
-- **An escalation ladder.** A checklist first; if it fails, a short review in a fresh context says what to do differently; only then Pi's own loop.
-- **Adaptive Ladder.** tinyCode learns which approach is the most efficient to solve tasks for your model. Every
-  model starts on the cheap checklist; if it rarely solves tasks there, tinyCode starts that model in the loop
-  instead, and retries the checklist now and then so a model can win it back. No per-model settings.
-- **Cache-friendly prompts** that keep llama.cpp's prompt cache warm.
+## What it does
 
-You keep using Pi as usual. Plain requests are matched to a workflow, tinyCode says in one line what it understood, and it runs after you confirm.
+| Command | What it's for |
+|---|---|
+| `/research` | Answer a question ("is there a library for X?", "how do others do Y?") from GitHub and the web, in a separate context. You get a short answer with links. |
+| `/plan` | Turn "I want to build X", or a change to an existing project, into a short spec and a list of small tasks, each with a test that defines done. |
+| `/build` | Work through the plan one task at a time: write the test, make it pass, run the suite, commit. Stops and explains if a task gets stuck; resumes where it left off. |
+| `/fix` | Make a failing test pass, or fix a described bug. |
+| `/edit` | Change one file as described, with file-type checks (Python compiles, AppleScript recompiles on macOS). |
+| `/review` | Review your current changes, one hunk at a time, and list findings with file and line. |
+
+You don't have to remember the commands. Ask in plain words: tinyCode says in one line what it understood
+("fix: the failing test in orders, run it?") and runs after you confirm. Anything else goes to Pi as usual.
+
+## How it stays small
+
+- **The ladder.** Every fix starts with a checklist: code runs the test, outlines the project and lets the model
+  pick the files, and the model answers with small find-and-replace edits. That's usually two calls. If it fails, a
+  separate call reviews the error and the attempt, and the checklist tries once more. Only then does Pi's full loop
+  take over, from a clean copy.
+- **Adaptive Ladder.** tinyCode learns which approach is most efficient for your model. Models that rarely succeed
+  at the checklist start in the loop, and get retried now and then.
+- **Subagents, everywhere.** Research, side questions and each build task run in their own context, and only the
+  result returns. The main conversation grows by answers, never by search output.
+- **Prompts that stay the same from call to call**, so llama.cpp's prompt cache does most of the reading.
+- **Limits on the loop:** repeated calls are stopped, long tool output is trimmed, and old output is hidden.
 
 ## Early numbers
 
