@@ -16,6 +16,9 @@ tinyCode moves the routine decisions from the model to code:
 - **One call per step where possible.** The model answers with small find-and-replace edits; code applies them and runs the tests.
 - **Branching.** Side questions run in a separate call, and only the answer, with file and line references, returns to the main conversation.
 - **An escalation ladder.** A checklist first; if it fails, a short review in a fresh context says what to do differently; only then Pi's own loop.
+- **Adaptive Ladder.** tinyCode learns which approach is the most efficient to solve tasks for your model. Every
+  model starts on the cheap checklist; if it rarely solves tasks there, tinyCode starts that model in the loop
+  instead, and retries the checklist now and then so a model can win it back. No per-model settings.
 - **Cache-friendly prompts** that keep llama.cpp's prompt cache warm.
 
 You keep using Pi as usual. Plain requests are matched to a workflow, tinyCode says in one line what it understood, and it runs after you confirm.
