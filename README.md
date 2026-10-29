@@ -22,14 +22,72 @@ You keep using Pi as usual. Plain requests are matched to a workflow, tinyCode s
 
 ## Early numbers
 
-From our own small benchmark (ten coding tasks, one run per cell, tasks written by us), a 12B model on a 16 GB card:
+Our own benchmark, run while designing tinyCode. Small samples (one run per cell, tasks written by us), so read it as
+direction, not proof. The full harness will be published with the first release.
 
-| | passed | calls per task | typical time |
+### Setup
+
+| | |
+|---|---|
+| Models | **Gemma 4 12B** (instruct, IQ4_XS GGUF) and **Qwen 3.5 4B** (Q8_0 GGUF) |
+| Hardware | NVIDIA Tesla T4 16 GB (Gemma, 32k context per slot) and Quadro P4000 8 GB (Qwen) |
+| Server | llama.cpp `llama-server`, OpenAI-compatible API, prompt cache on |
+| Settings | temperature 0, thinking off, one task at a time |
+| Limits | 30 calls or 30 minutes per task |
+| Check | each task has a pytest test that decides pass or fail |
+
+### Contenders
+
+- **One call:** code sends the failing test and the files it imports; the model answers with find-and-replace edits; one retry.
+- **Checklist:** code outlines the project, the model picks up to five files, then edits; one retry.
+- **Ladder** (tinyCode's design): the checklist first; if it fails, a review in a fresh context says what to do
+  differently and the checklist tries once more; only then Pi's own loop.
+- **Pi:** bare Pi 1.4 with its four tools, exploring on its own.
+
+### Round 1: ten easy tasks
+
+Small Python repos: bug fixes, a small feature, a rename across three files, an environment-variable override, a
+bug two imports away in a 2,000-line repo. Every contender passed almost everything, so tokens told the story.
+
+| Gemma 4 12B | passed | calls per task | prompt tokens per task |
 |---|---|---|---|
-| tinyCode-style checklist | 9/10 | about 2 | under 20 s |
-| plain agent loop | 7/10 | about 21 | about 80 s |
+| One call | 10/10 | 1.0 | about 800 |
+| Pi | 10/10 | 7.7 | about 15,700 (80 % served from cache) |
 
-Small sample; the release will publish the full method.
+### Round 2: ten harder tasks
+
+None of the task texts names the file to change:
+
+1. A monthly report groups orders by day of month instead of by month (the bug is in a date helper).
+2. A word counter splits contractions into two words.
+3. An invoice crashes on a missing field; fix the cause, not the symptom.
+4. Add a CSV export registered like the existing formats, with its own setting.
+5. Add priorities to a to-do app: a new field, old files still load, sorting, validation.
+6. Move helpers into a new module, rename a function, update every user, delete the old module.
+7. An upload limit disagrees with the documentation; the fix belongs in the config file.
+8. Add a list helper and write its tests (no test given; a hidden test checks it).
+9. A planted bug in a real web app of ours (about 2,000 lines).
+10. A planted bug in the scheduler of a real job queue of ours.
+
+| Gemma 4 12B | passed | calls per task | prompt tokens per task | typical time |
+|---|---|---|---|---|
+| One call | 6/10 | 1.3 | about 1,500 | 14 s |
+| Checklist | 9/10 | 2.1 | about 4,800 | 19 s |
+| **Ladder** | **10/10** | **3.1** | **about 5,900** | **20 s** |
+| Pi | 7/10 | 20.8 | about 144,000 | 83 s |
+
+On Gemma the ladder solved 8 tasks at the first rung, 1 after the review and 1 in Pi's loop. Pi's three failures
+all hit the 30-call limit.
+
+| Qwen 3.5 4B | passed | calls per task | prompt tokens per task | typical time |
+|---|---|---|---|---|
+| One call | 4/10 | 1.6 | about 1,700 | 15 s |
+| Checklist | 5/10 | 2.7 | about 5,300 | 17 s |
+| Ladder | 8 of 9 so far | 11.1 | | 49 s |
+| Pi | 10/10 | 11.3 | about 54,000 | 68 s |
+
+The small model makes more wrong first edits, so it leans on the loop: Pi's trial and error suits it, and the
+ladder reaches its last rung more often there.
 
 ## Requirements (planned)
 
