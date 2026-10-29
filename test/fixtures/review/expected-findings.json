@@ -1,0 +1,16 @@
+[
+  {
+    "file": "orders/dates.py",
+    "line": 11,
+    "severity": "high",
+    "issue": "strftime uses %d (day) instead of %m",
+    "fix": "use %m"
+  },
+  {
+    "file": "README.md",
+    "line": 1,
+    "severity": "low",
+    "issue": "wording",
+    "fix": "reword"
+  }
+]

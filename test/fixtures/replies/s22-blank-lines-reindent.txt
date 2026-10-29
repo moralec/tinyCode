@@ -1,0 +1,8 @@
+pager.py
+<<<<<<< SEARCH
+start = page * size
+=======
+start = (page - 1) * size
+
+# comment
+>>>>>>> REPLACE

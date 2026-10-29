@@ -1,0 +1,11 @@
+Here is the fix:
+
+pager.py
+<<<<<<< SEARCH
+    start = page * size
+=======
+    start = (page - 1) * size
+>>>>>>> REPLACE
+
+
+This shifts pages to be 1-based.

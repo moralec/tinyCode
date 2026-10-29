@@ -1,0 +1,7 @@
+newmod/helpers.py
+<<<<<<< SEARCH
+
+=======
+def h():
+    return 1
+>>>>>>> REPLACE

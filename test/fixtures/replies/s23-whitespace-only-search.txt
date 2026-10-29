@@ -1,0 +1,6 @@
+pager.py
+<<<<<<< SEARCH
+   
+=======
+z = 1
+>>>>>>> REPLACE

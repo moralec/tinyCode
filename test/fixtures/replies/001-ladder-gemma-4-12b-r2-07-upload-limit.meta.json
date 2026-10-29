@@ -1,0 +1,1 @@
+{"task": "r2-07-upload-limit", "protected": ["tests/test_task.py"], "source": "ladder-gemma-4-12b-r2-07-upload-limit"}

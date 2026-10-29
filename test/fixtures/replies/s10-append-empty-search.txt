@@ -1,0 +1,7 @@
+pager.py
+<<<<<<< SEARCH
+
+=======
+def last(items):
+    return items[-1]
+>>>>>>> REPLACE

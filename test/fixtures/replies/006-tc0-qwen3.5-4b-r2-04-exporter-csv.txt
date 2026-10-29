@@ -1,0 +1,37 @@
+exporter/settings.py
+<<<<<<< SEARCH
+EXTENSIONS = {"json": ".json", "text": ".txt"}
+=======
+EXTENSIONS = {"json": ".json", "text": ".txt", "csv": ".csv"}
+>>>>>>> REPLACE
+
+exporter/formats/__init__.py
+<<<<<<< SEARCH
+from exporter.formats.json_fmt import write_json
+from exporter.formats.text_fmt import write_text
+
+REGISTRY = {"json": write_json, "text": write_text}
+=======
+from exporter.formats.csv_fmt import write_csv
+from exporter.formats.json_fmt import write_json
+from exporter.formats.text_fmt import write_text
+
+REGISTRY = {"json": write_json, "text": write_text, "csv": write_csv}
+>>>>>>> REPLACE
+
+exporter/formats/csv_fmt.py
+<<<<<<< SEARCH
+=======
+def write_csv(records, fh):
+    pass
+=======
+import csv
+
+
+def write_csv(records, fh):
+    writer = csv.writer(fh)
+    if records:
+        writer.writerow(list(records[0].keys()))
+    for r in records:
+        writer.writerow(list(r.values()))
+>>>>>>> REPLACE

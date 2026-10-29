@@ -1,0 +1,10 @@
+{
+ "repo": "r2-03-invoice-keyerror",
+ "test": "tests/test_task.py",
+ "replies": [
+  "{\"files\": [\"billing/invoice.py\"], \"reason\": \"render is here\"}",
+  "billing/invoice.py\n<<<<<<< SEARCH\n    return fill(INVOICE, number=number, **breakdown(lines, rate))\n=======\n    return fill(INVOICE, number=number, tax=0, **breakdown(lines, rate))\n>>>>>>> REPLACE",
+  "{\"diagnosis\": \"The test still calls breakdown()['tax'] but pricing.py returns 'taxes'.\", \"where\": [\"billing/pricing.py:7\"], \"next_step\": \"Rename the key to tax in pricing.py and keep the template on tax.\"}",
+  "billing/invoice.py\n<<<<<<< SEARCH\nthis text is not in the file\n=======\nx\n>>>>>>> REPLACE"
+ ]
+}

@@ -1,0 +1,25 @@
+tinyCode
+Copyright 2026 tinyCode contributors
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+tinyCode is an extension for Pi and is built on it:
+
+  Pi (https://github.com/earendil-works/pi), MIT License.
+  tinyCode uses Pi's extension API and runs Pi's own loop for hard cases. No Pi source code is included in this
+  repository; the installer downloads Pi from npm.
+
+tinyCode borrows ideas from little-coder:
+
+  little-coder (https://github.com/itayinbarr/little-coder), Apache License 2.0.
+  Ideas borrowed (see the comments in src/limits.ts):
+    - repeated-call detection, from its quality-monitor extension (tinyCode stops the run, or steps back, instead
+      of only nudging);
+    - the turn cap, from its turn-cap extension;
+    - the view cap on file reads, from its read-guard extension (tinyCode's is stricter), and the read/edit guard
+      pairing from write-guard and read-guard;
+    - the pattern of keeping the newest tool results and replacing older ones with short placeholders, from its
+      browser-extract-retention extension (tinyCode does it in batches).
+  The code is tinyCode's own. No little-coder source file was copied verbatim, so no file carries its header.
+
+The idea of reciting a todo list at the tail of the context comes from published descriptions of Manus's context
+engineering; no code was taken.

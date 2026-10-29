@@ -1,0 +1,6 @@
+dup.py
+<<<<<<< SEARCH
+print(x)
+=======
+print(x + 1)
+>>>>>>> REPLACE

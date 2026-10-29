@@ -1,0 +1,60 @@
+core/currency.py
+<<<<<<< SEARCH
+def parse_money(text):
+    """'12.50' or '€12.50' -> 1250 (cents)"""
+    text = text.strip().lstrip("€$")
+    whole, _, frac = text.partition(".")
+    return int(whole) * 100 + int((frac + "00")[:2])
+
+
+def fmt_money(cents, symbol="€"):
+    return "%s%d.%02d" % (symbol, cents // 100, cents % 100)
+=======
+def parse_money(text):
+    """'12.50' or '€12.50' -> 1250 (cents)"""
+    text = text.strip().lstrip("€$")
+    whole, _, frac = text.partition(".")
+    return int(whole) * 100 + int((frac + "00")[:2])
+
+
+def format_money(cents, symbol="€"):
+    return "%s%d.%02d" % (symbol, cents // 100, cents % 100)
+>>>>>>> REPLACE
+
+utils/money.py
+<<<<<<< SEARCH
+def parse_money(text):
+    """'12.50' or '€12.50' -> 1250 (cents)"""
+    text = text.strip().lstrip("€$")
+    whole, _, frac = text.partition(".")
+    return int(whole) * 100 + int((frac + "00")[:2])
+
+
+def fmt_money(cents, symbol="€"):
+    return "%s%d.%02d" % (symbol, cents // 100, cents % 100)
+=======
+
+>>>>>>> REPLACE
+
+utils/__init__.py
+<<<<<<< SEARCH
+=======
+from utils.money import parse_money, fmt_money
+=======
+>>>>>>> REPLACE
+
+shop/cart.py
+<<<<<<< SEARCH
+from utils.money import parse_money, fmt_money
+=======
+from core.currency import parse_money, format_money
+>>>>>>> REPLACE
+
+shop/receipt.py
+<<<<<<< SEARCH
+from utils import money
+from utils.text import pad
+=======
+from core.currency import format_money
+from utils.text import pad
+>>>>>>> REPLACE

@@ -1,0 +1,58 @@
+todo/cli.py
+<<<<<<< SEARCH
+    add.add_argument("text")
+=======
+    add.add_argument("text")
+    add.add_argument("--priority", choices=["low", "normal", "high"], default="normal")
+>>>>>>> REPLACE
+
+todo/model.py
+<<<<<<< SEARCH
+@dataclass
+class Task:
+    id: int
+    text: str
+    done: bool = False
+=======
+@dataclass
+class Task:
+    id: int
+    text: str
+    done: bool = False
+    priority: str = "normal"
+>>>>>>> REPLACE
+
+todo/listing.py
+<<<<<<< SEARCH
+def ordered(tasks):
+    return sorted(tasks, key=lambda t: t.id)
+
+
+def render(tasks):
+    return "\n".join("%d [%s] %s" % (t.id, "x" if t.done else " ", t.text) for t in ordered(tasks))
+=======
+def ordered(tasks):
+    priority_order = {"high": 0, "normal": 1, "low": 2}
+    return sorted(tasks, key=lambda t: (priority_order[t.priority], t.id))
+
+
+def render(tasks):
+    return "\n".join("%d [%s] %s" % (t.id, "x" if t.done else " ", t.text) for t in ordered(tasks))
+>>>>>>> REPLACE
+
+todo/storage.py
+<<<<<<< SEARCH
+def load(path):
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return [Task(id=r["id"], text=r["text"], done=r.get("done", False)) for r in json.load(f)]
+=======
+def load(path):
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        data = json.load(f)
+        tasks = [Task(id=r["id"], text=r["text"], done=r.get("done", False), priority=r.get("priority", "normal")) for r in data]
+        return tasks
+>>>>>>> REPLACE

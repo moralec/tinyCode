@@ -1,0 +1,7 @@
+{
+ "repo": "r2-03-invoice-keyerror",
+ "test": "tests/test_task.py",
+ "replies": [
+  "{\"files\": [\"billing/pricing.py\", \"billing/templates.py\"], \"reason\": \"two files\"}"
+ ]
+}

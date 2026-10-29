@@ -1,0 +1,10 @@
+{
+ "repo": "r2-03-invoice-keyerror",
+ "test": "tests/test_task.py",
+ "replies": [
+  "{\"files\": [\"billing/templates.py\", \"billing/pricing.py\"], \"reason\": \"template key and pricing key disagree\"}",
+  "billing/templates.py\n<<<<<<< SEARCH\nINVOICE = \"Invoice {number}\\nnet {net:.2f}\\ntax {tax:.2f}\n=======\nINVOICE = \"Invoice {number}\\nnet {net:.2f}\\ntax {taxes:.2f}\n>>>>>>> REPLACE",
+  "{\"diagnosis\": \"The test still calls breakdown()['tax'] but pricing.py returns 'taxes'.\", \"where\": [\"billing/pricing.py:7\"], \"next_step\": \"Rename the key to tax in pricing.py and keep the template on tax.\"}",
+  "billing/templates.py\n<<<<<<< SEARCH\ntax {taxes:.2f}\n=======\ntax {tax:.2f}\n>>>>>>> REPLACE\n\nbilling/pricing.py\n<<<<<<< SEARCH\n\"taxes\": taxes\n=======\n\"tax\": taxes\n>>>>>>> REPLACE"
+ ]
+}

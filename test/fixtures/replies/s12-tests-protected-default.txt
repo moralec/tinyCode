@@ -1,0 +1,6 @@
+tests/test_pager.py
+<<<<<<< SEARCH
+assert
+=======
+assert not
+>>>>>>> REPLACE

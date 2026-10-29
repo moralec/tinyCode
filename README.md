@@ -4,7 +4,7 @@
 
 <p align="center">A <a href="https://github.com/earendil-works/pi">Pi</a> extension for coding with small local models, built to spend as few tokens as possible on every call.</p>
 
-> **Work in progress.** Nothing to install yet. The first release is being built now; this page will say when it is ready.
+> **Preview — v0.1.** Works, but rough edges remain; see [Known issues](#known-issues-v01). Feedback welcome via GitHub issues.
 
 ## Why
 
@@ -29,12 +29,14 @@ doing only the thinking.
 
 ```
 > the monthly report puts every day in its own bucket, can you fix it?
-  fix: monthly report groups by day instead of month — run it? [y/N] y
-  ✓ fixed in orders/dates.py (2 calls, 17 s) — tests pass
+  I'll find why the monthly report groups by day and fix it.
+  ✓ pick files · ✓ edit · ✓ tests
+  Fixed: the date helper used the day instead of the month (orders/dates.py). Tests pass. (2 calls, 17 s)
 ```
 
-It always says in one line what it understood and waits for your yes. Anything that isn't a coding job (a
-question, a chat) goes to Pi as usual. The commands are there if you'd rather be explicit:
+It says in one sentence what it's about to do, shows its progress, and reports the result in plain words. It asks first
+only before irreversible steps you didn't ask for (such as committing). Anything that isn't a coding job (a question, a
+chat) goes to Pi as usual. The commands are there if you'd rather be explicit:
 
 ### Commands
 
@@ -84,22 +86,66 @@ tasks written by us: read it as direction, not proof.
 
 With Qwen 3.5 4B on an 8 GB card, both pass 9–10 of 10, and most tasks need the loop, which is what the Adaptive
 Ladder learns. Setup: llama.cpp `llama-server`, temperature 0, thinking off, 30 calls or 30 minutes per task.
-The full method and task list come with the first release.
+A fuller benchmark (repeated runs plus a third-party task set) is coming.
 
 ## Installation
 
-Not available yet: the first release is being built and tested now.
+You need an OpenAI-compatible endpoint (llama.cpp's `llama-server` is the one we use) and `git`. The installer sets up
+a private copy of Node (if needed), [Pi](https://github.com/earendil-works/pi) 1.4 and tinyCode, writes your settings,
+and checks that the endpoint answers. Nothing is installed globally.
 
-When it ships, one command installs a private copy of Node (if needed), Pi and tinyCode, asks for your model
-endpoint, and checks that it answers:
+**macOS and Linux**
 
-- **macOS and Linux:** `install.sh`
-- **Windows:** `install.ps1` (support will be claimed once automated tests pass on Windows)
+```
+git clone https://github.com/moralec/tinyCode && cd tinyCode
+sh install.sh
+```
 
-You will need an OpenAI-compatible endpoint, such as llama.cpp's `llama-server`, and [Pi](https://github.com/earendil-works/pi)
-1.4 or later (the installer can set it up).
+**Windows** (untested so far — please report): in PowerShell,
+
+```
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+See [docs/WINDOWS.md](docs/WINDOWS.md) for prerequisites (Git for Windows, Python with pytest).
+
+The defaults are endpoint `http://127.0.0.1:8080/v1` and a model named `tinycode-model`. Override with flags, for
+example `sh install.sh --endpoint http://127.0.0.1:11434/v1 --trunk-model qwen2.5-coder:14b --small-model qwen2.5-coder:7b`
+(`install.ps1` takes `-Endpoint`, `-TrunkModel`, `-SmallModel`). `--check` re-runs the health check, `--uninstall`
+removes everything (add `--purge` to delete your settings and logs too). Open a new terminal afterwards.
+
+### Models
+
+Two models we recommend, from our own measurements on one GPU:
+
+| | Preferred | Smaller |
+|---|---|---|
+| Model | Qwen3.6-35B-A3B | gemma-4-12b-it |
+| File | `UD-IQ3_XXS` from [unsloth/Qwen3.6-35B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF), about 13 GB | `IQ4_XS` from [unsloth/gemma-4-12b-it-GGUF](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF), about 6.4 GB |
+
+Start either with the same alias, so tinyCode's setup doesn't change:
+
+```
+llama-server -m <model file> -a tinycode-model -ngl 99 -c 32768 -np 1 -fa on --jinja --reasoning-budget 0 --port 8080
+```
+
+### Using it
+
+Run `pi` in your project and ask in plain language: tinyCode says what it's about to do, then does it. Or use the
+commands above (`/fix`, `/edit`, `/review`, ...). `/tinycode` prints the effective configuration and `/tinycode stats`
+the calls per step. It runs in auto mode by default; `/dev on` turns on diagnostics (router hints, events, per-call
+tokens) and `/dev off` turns them off.
+
+## Known issues (v0.1)
+
+1. README updates can "correct" statements that were already right: review the diff before keeping it.
+2. `/fix` without a failing test may search a long time when the described bug isn't there.
+3. `install.ps1` is untested on real Windows.
+4. Some plain-language requests run in Pi's general loop instead of a workflow, which is slower.
+5. With small models, tool choice is weaker when the request is ambiguous; naming the file helps.
+6. Results so far are from our own small benchmark on one machine.
 
 ## Licence
 
 Apache-2.0. tinyCode builds on Pi (MIT) and borrows ideas from [little-coder](https://github.com/itayinbarr/little-coder)
-(Apache-2.0); credits will be listed in `NOTICE` with the first release.
+(Apache-2.0); credits are in [NOTICE](NOTICE).

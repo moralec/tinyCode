@@ -1,0 +1,14 @@
+uploader/config.py
+<<<<<<< SEARCH
+def load(path=None):
+    cp = configparser.ConfigParser()
+    cp.read(path or DEFAULT_PATH)
+    return cp
+=======
+def load(path=None):
+    cp = configparser.ConfigParser()
+    cp.read(path or DEFAULT_PATH)
+    if "limits" not in cp:
+        cp["limits"] = {"max_upload_mb": "25"}
+    return cp
+>>>>>>> REPLACE

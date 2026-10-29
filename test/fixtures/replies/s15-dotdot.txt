@@ -1,0 +1,6 @@
+../escape.py
+<<<<<<< SEARCH
+
+=======
+x = 1
+>>>>>>> REPLACE

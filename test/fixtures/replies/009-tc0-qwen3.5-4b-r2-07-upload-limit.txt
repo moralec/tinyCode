@@ -1,0 +1,8 @@
+uploader/limits.py
+<<<<<<< SEARCH
+def max_upload_bytes(path=None):
+    return int(config.load(path).getfloat("limits", "max_upload_mb") * MB)
+=======
+def max_upload_bytes(path=None):
+    return int(config.load(path).getfloat("limits", "max_upload_mb") * MB)
+>>>>>>> REPLACE

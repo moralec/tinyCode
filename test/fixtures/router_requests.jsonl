@@ -1,0 +1,16 @@
+{"task": "r2-01-orders-monthly", "text": "monthly_totals gives me two rows for january, fix it", "expect": "fix", "file": "orders/report.py"}
+{"task": "r2-02-textstats-words", "text": "word count comes out too high whenever there's a contraction like don't, can you sort that", "expect": "fix", "file": null}
+{"task": "r2-03-invoice-keyerror", "text": "invoice.py crashes with KeyError 'tax' when I render one", "expect": "fix", "file": "billing/invoice.py"}
+{"task": "r2-07-upload-limit", "text": "uploads over 2.5MB get rejected but the readme promises 25MB", "expect": "fix", "file": null}
+{"task": "r2-04-exporter-csv", "text": "add a csv format to the exporter", "expect": "edit", "file": null}
+{"task": "r2-05-todo-priority", "text": "todo items need a priority, low normal or high", "expect": "edit", "file": null}
+{"task": "r2-06-money-move", "text": "move fmt_money into core/currency.py and call it format_money", "expect": "edit", "file": "utils/money.py"}
+{"task": "r2-08-chunk-no-test", "text": "add chunk(seq, n) to listutil.py with tests", "expect": "edit", "file": "listutil.py"}
+{"task": "r2-01-orders-monthly", "text": "I'd like yearly totals as well, next to quarterly_totals", "expect": "edit", "file": "orders/report.py"}
+{"task": "r2-02-textstats-words", "text": "stats.py should count paragraphs too", "expect": "edit", "file": "textstats/stats.py"}
+{"task": "r2-03-invoice-keyerror", "text": "quick sanity pass over pricing.py before I ship it please", "expect": "review", "file": "billing/pricing.py"}
+{"task": "r2-04-exporter-csv", "text": "write a README for the exporter that covers the formats", "expect": "readme", "file": null}
+{"task": "r2-05-todo-priority", "text": "the readme needs a section on the cli commands", "expect": "readme", "file": null}
+{"task": "r2-04-exporter-csv", "text": "hmm, not sure about this one", "expect": "none", "file": null}
+{"task": "r2-04-exporter-csv", "text": "how long would a csv export take to build, roughly?", "expect": "none", "file": null}
+{"task": "r2-05-todo-priority", "text": "thanks, that's all for today", "expect": "none", "file": null}

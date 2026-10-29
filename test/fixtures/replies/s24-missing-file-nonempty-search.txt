@@ -1,0 +1,6 @@
+ghost.py
+<<<<<<< SEARCH
+a
+=======
+b
+>>>>>>> REPLACE

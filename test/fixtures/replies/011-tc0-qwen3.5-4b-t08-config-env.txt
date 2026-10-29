@@ -1,0 +1,49 @@
+app/config.py
+<<<<<<< SEARCH
+import json
+import os
+
+DEFAULTS = {"host": "203.0.113.1", "port": 8000, "debug": False, "timeout": 2.5}
+
+
+def load_config(path=None):
+    cfg = dict(DEFAULTS)
+    if path and os.path.exists(path):
+        with open(path) as f:
+            cfg.update(json.load(f))
+    return cfg
+=======
+import json
+import os
+
+DEFAULTS = {"host": "203.0.113.1", "port": 8000, "debug": False, "timeout": 2.5}
+
+
+def load_config(path=None):
+    cfg = dict(DEFAULTS)
+    if path and os.path.exists(path):
+        with open(path) as f:
+            cfg.update(json.load(f))
+    
+    # Apply environment overrides
+    for key, value in os.environ.items():
+        if key.startswith("APP_"):
+            env_key = key[4:]  # Remove "APP_" prefix
+            if env_key in cfg:
+                default = cfg[env_key]
+                if isinstance(default, bool):
+                    # Handle boolean conversion
+                    if value.lower() in ("1", "0", "true", "false", "yes", "no"):
+                        cfg[env_key] = value.lower() in ("1", "true", "yes")
+                elif isinstance(default, (int, float)):
+                    # Handle numeric conversion
+                    try:
+                        cfg[env_key] = float(value)
+                    except ValueError:
+                        pass
+                else:
+                    # String default, keep as string
+                    cfg[env_key] = value
+    
+    return cfg
+>>>>>>> REPLACE

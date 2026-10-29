@@ -1,0 +1,10 @@
+pager.py
+<<<<<<< SEARCH
+start = page * size
+return items[start:start + size]
+=======
+start = (page - 1) * size
+if start < 0:
+    return []
+return items[start:start + size]
+>>>>>>> REPLACE

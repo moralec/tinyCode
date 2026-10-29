@@ -1,0 +1,76 @@
+core/currency.py
+<<<<<<< SEARCH
+=======
+def parse_money(text):
+    """'12.50' or '€12.50' -> 1250 (cents)"""
+    text = text.strip().lstrip("€$")
+    whole, _, frac = text.partition(".")
+    return int(whole) * 100 + int((frac + "00")[:2])
+
+
+def format_money(cents, symbol="€"):
+    return "%s%d.%02d" % (symbol, cents // 100, cents % 100)
+>>>>>>> REPLACE
+
+shop/cart.py
+<<<<<<< SEARCH
+from utils.money import parse_money, fmt_money
+
+
+class Cart:
+    def __init__(self):
+        self.items = []
+
+    def add(self, name, price):
+        self.items.append((name, parse_money(price)))
+
+    def total(self):
+        return fmt_money(sum(c for _, c in self.items))
+=======
+from core.currency import parse_money, format_money
+
+
+class Cart:
+    def __init__(self):
+        self.items = []
+
+    def add(self, name, price):
+        self.items.append((name, parse_money(price)))
+
+    def total(self):
+        return format_money(sum(c for _, c in self.items))
+>>>>>>> REPLACE
+
+shop/receipt.py
+<<<<<<< SEARCH
+from utils import money
+from utils.text import pad
+
+
+def receipt(cart):
+    lines = [pad(n, 12) + money.fmt_money(c) for n, c in cart.items]
+    return "\n".join(lines + [pad("TOTAL", 12) + cart.total()])
+=======
+from core.currency import format_money
+from utils.text import pad
+
+
+def receipt(cart):
+    lines = [pad(n, 12) + format_money(c) for n, c in cart.items]
+    return "\n".join(lines + [pad("TOTAL", 12) + cart.total()])
+>>>>>>> REPLACE
+
+utils/money.py
+<<<<<<< SEARCH
+def parse_money(text):
+    """'12.50' or '€12.50' -> 1250 (cents)"""
+    text = text.strip().lstrip("€$")
+    whole, _, frac = text.partition(".")
+    return int(whole) * 100 + int((frac + "00")[:2])
+
+
+def fmt_money(cents, symbol="€"):
+    return "%s%d.%02d" % (symbol, cents // 100, cents % 100)
+=======
+=======
+>>>>>>> REPLACE

@@ -1,0 +1,46 @@
+{
+  "name": "tinycode",
+  "version": "0.1.0",
+  "description": "A Pi extension for coding with small local models: workflows that spend as few tokens as possible on every call",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moralec/tinyCode.git"
+  },
+  "homepage": "https://github.com/moralec/tinyCode",
+  "bugs": {
+    "url": "https://github.com/moralec/tinyCode/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "llama.cpp",
+    "local-llm",
+    "coding-agent"
+  ],
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions/tinycode/index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test test/unit/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}

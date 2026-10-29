@@ -1,0 +1,25 @@
+billing/invoice.py
+<<<<<<< SEARCH
+def render(number, lines, rate="standard"):
+    return fill(INVOICE, number=number, **breakdown(lines, rate))
+=======
+def render(number, lines, rate="standard"):
+    return fill(INVOICE, number=number, **breakdown(lines, rate, rate=rate))
+>>>>>>> REPLACE
+</think>
+
+billing/pricing.py
+<<<<<<< SEARCH
+def breakdown(lines, rate="standard"):
+    """lines: [(unit_price, qty)] -> {'net', 'tax', 'gross'} rounded to cents."""
+    net = round(sum(p * q for p, q in lines), 2)
+    taxes = round(net * RATES[rate], 2)
+    return {"net": net, "taxes": taxes, "gross": round(net + taxes, 2)}
+=======
+def breakdown(lines, rate="standard"):
+    """lines: [(unit_price, qty)] -> {'net', 'tax', 'gross'} rounded to cents."""
+    net = round(sum(p * q for p, q in lines), 2)
+    taxes = round(net * RATES[rate], 2)
+    return {"net": net, "tax": taxes, "gross": round(net + taxes, 2)}
+>>>>>>> REPLACE
+</think>

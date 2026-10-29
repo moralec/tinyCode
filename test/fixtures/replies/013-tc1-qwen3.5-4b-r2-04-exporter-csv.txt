@@ -1,0 +1,20 @@
+exporter/formats/__init__.py
+<<<<<<< SEARCH
+from exporter.formats.json_fmt import write_json
+from exporter.formats.text_fmt import write_text
+
+REGISTRY = {"json": write_json, "text": write_text}
+=======
+from exporter.formats.json_fmt import write_json
+from exporter.formats.text_fmt import write_text
+from exporter.formats.csv_fmt import write_csv
+
+REGISTRY = {"json": write_json, "text": write_text, "csv": write_csv}
+>>>>>>> REPLACE
+
+exporter/settings.py
+<<<<<<< SEARCH
+EXTENSIONS = {"json": ".json", "text": ".txt"}
+=======
+EXTENSIONS = {"json": ".json", "text": ".txt", "csv": ".csv"}
+>>>>>>> REPLACE

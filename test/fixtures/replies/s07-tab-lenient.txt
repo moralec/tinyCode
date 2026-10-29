@@ -1,0 +1,8 @@
+tabs.py
+<<<<<<< SEARCH
+if x:
+    return 1
+=======
+if x:
+    return 2
+>>>>>>> REPLACE

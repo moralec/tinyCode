@@ -1,0 +1,6 @@
+tests\\test_pager.py
+<<<<<<< SEARCH
+x
+=======
+y
+>>>>>>> REPLACE

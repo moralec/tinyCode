@@ -1,0 +1,14 @@
+pager.py
+<<<<<<< SEARCH
+    start = page * size
+=======
+    start = (page - 1) * size
+>>>>>>> REPLACE
+
+
+pager.py
+<<<<<<< SEARCH
+    return -(-len(items) // size)
+=======
+    return max(1, -(-len(items) // size))
+>>>>>>> REPLACE
