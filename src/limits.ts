@@ -15,6 +15,7 @@
 // interventions in a run, or a repeat that continues after its nudge, tinyCode STEPS BACK: it stops masking, view and
 // result caps, re-read refusals and oversized-edit refusals for the rest of that run, and Pi works as it would
 // without tinyCode. The todo tail and the prompt section stay (they only add).
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Config } from "./config.ts";
@@ -591,11 +592,16 @@ export function withTail(messages: Msg[], todo: Todo, outputLimitHit: boolean, e
  * twice in a row. A window whose content changed since (its hash differs: the model edited it) is served at once.
  * (The hash is of the window, not of the file: after one edited line the other windows are still nudged.)
  */
+export const KEPT_REREAD = "Unchanged since the checkpoint; its text is above. Need it again: ask again, it is served.";
+
 export class ReadMemory {
-  private seen = new Map<string, { turn: number; hash: string; refused: boolean }>();
+  private seen = new Map<string, { turn: number; hash: string; refused: boolean; kept?: boolean }>();
+  /** the last refusal was of a kept file (a checkpoint showed it): a pointer, not an intervention */
+  keptHit = false;
 
   reset(): void {
     this.seen.clear();
+    this.keptHit = false;
   }
 
   /** The window `read` will return: explicit offset/limit, else line 1 and the view cap (`capView` ran first). */
@@ -608,13 +614,30 @@ export class ReadMemory {
   /** Returns a note instead of the text for the first re-read, or null when the read is served (and remembered). */
   check(key: string, turn: number, hash: string): string | null {
     const prev = this.seen.get(key);
+    this.keptHit = false;
     if (prev && prev.hash === hash && !prev.refused) {
       prev.refused = true;
+      this.keptHit = prev.kept === true;
+      if (prev.kept) return KEPT_REREAD;
       return `Unchanged since your read at turn ${prev.turn}; that result is still above. Need it again: ask again, it is served.`;
     }
     this.seen.set(key, { turn, hash, refused: false });
     return null;
   }
+
+  /**
+   * A file the model sees whole without a read call (a checkpoint's kept files, src/checkpoint.ts): every view window of
+   * `text` counts as read at `turn`, so a re-read is pointed at it like any other.
+   */
+  serve(path: string, text: string, turn: number, viewLines: number): void {
+    const n = text.split("\n").length;
+    for (let offset = 1; offset <= n; offset += viewLines) this.seen.set(ReadMemory.key(path, { offset }, viewLines), { turn, hash: windowHash(text, offset, viewLines), refused: false, kept: true });
+  }
+}
+
+/** The hash ReadMemory compares: of lines offset..offset+limit-1 of `text` (1-based). */
+export function windowHash(text: string, offset: number, limit: number): string {
+  return createHash("sha1").update(text.split("\n").slice(offset - 1, offset - 1 + limit).join("\n")).digest("hex");
 }
 
 /** Approximate tokens of the new text an `edit` (all its edits) or `write` would put on disk; 0 for other tools. */
@@ -831,7 +854,8 @@ export function toolCallVerdict(
     const limit = Number(input.limit ?? limits.viewLines) || limits.viewLines;
     const why = lim.reads.check(ReadMemory.key(path, input, limits.viewLines), lim.turns.count, env.windowHash(path, offset, limit));
     if (why) {
-      lim.intervene("re-read");
+      // a kept file's pointer is always true (its text is right after the checkpoint note): not counted toward stepBackAt
+      if (!lim.reads.keptHit) lim.intervene("re-read");
       return { action: "block", reason: why };
     }
   }

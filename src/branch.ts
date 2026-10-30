@@ -9,7 +9,7 @@ import { evidence, type Evidence } from "./context/evidence.ts";
 import { chat as realChat, type ChatOptions, type ChatResult, type Message } from "./llm.ts";
 import { MAX_TODO_CHARS, MAX_TODO_ITEMS, type Todo } from "./limits.ts";
 import { RESTORE_TOOL, type BestTree } from "./besttree.ts";
-import { parseCounts, runTests } from "./testrun.ts";
+import { failingNames, parseCounts, runTests } from "./testrun.ts";
 
 export const BRANCH_SYSTEM =
   "Answer a repo question from the evidence: file outline, grep hits (path:line: text). 1-2 sentences. Cite best path:line. " +
@@ -63,6 +63,8 @@ export interface BestHooks {
   tree: BestTree;
   snapshot(cwd: string): void;
   restore(cwd: string): unknown;
+  /** the best tree back without touching test files (limits.undoWorse); null = no snapshot; absent = no auto-undo */
+  undo?(cwd: string): unknown;
   onFirstBest(): void;
 }
 
@@ -99,7 +101,13 @@ export function registerBranchTools(pi: ExtensionAPI, cfg: Config, best?: BestHo
         let text = r.text;
         if (best) {
           const had = best.tree.has;
-          const note = best.tree.observe(r.counts ?? parseCounts(r.text), () => best.snapshot(cwd), () => best.restore(cwd));
+          const fails = failingNames(r.text, 1000);
+          const counts = r.counts ?? parseCounts(r.text);
+          const undo = best.undo;
+          const note = best.tree.observe(counts, () => best.snapshot(cwd), () => best.restore(cwd), {
+            undo: undo ? () => undo(cwd) : undefined,
+            sig: counts ? `${counts.passed}/${counts.failed}|${fails.names.join("|")}` : undefined,
+          });
           if (note) text += `\n${note}`;
           if (!had && best.tree.has) best.onFirstBest();
         }

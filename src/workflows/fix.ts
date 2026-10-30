@@ -3,7 +3,10 @@
 //   rung 1  outline -> pick <= 5 files (json_schema) -> files -> one edit call -> apply -> test
 //   rung 2  review call in a fresh context (test output, diff, evidence) -> diagnosis appended at the tail of the
 //           rung-1 conversation -> one more edit call -> apply -> test
+//   rung 1b the second quick try (ladder.secondTry): from the best tree when a rung beat the original (still-failing
+//           names, first error, current files, a fresh context), else a fresh sample of the rung-1 edit (seed + 1)
 //   rung 3  restore the tree to its pre-ladder state, then hand the task (+ diagnosis) to Pi's guarded loop
+// Quick tries (rung 1, rung 1b) are window-sized (quickfit.ts): each leaves ladder.replyReserve tokens for the reply.
 // Every direct call goes through `chat(step, ...)` (lanes, fallback, call log); every reply is also saved to
 // fix-replies.jsonl next to the call log, so later goldens are real model output.
 import { NOOP_PROGRESS, type Progress } from "../progress.ts";
@@ -12,7 +15,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { decide, logRun, readRuns } from "../adaptive.ts";
-import type { Config } from "../config.ts";
+import { DEFAULT_CONTEXT_WINDOW, type Config } from "../config.ts";
 import { evidence } from "../context/evidence.ts";
 import { outline, repoFiles } from "../context/outline.ts";
 import { lintPass, type LintOptions } from "../lint.ts";
@@ -22,6 +25,7 @@ import { logPath } from "../log.ts";
 import { applyReply, type ApplyResult } from "../protocol/apply.ts";
 import { SYSTEM } from "../protocol/prompts.ts";
 import { failingNames, failureBlocks, firstErrorLine, parseCounts, runTests, type TestCounts, type TestRun } from "../testrun.ts";
+import { failingTestsCode, fence, fitFixed, fitHead, type Fit, type FitOpts, type QuickHead } from "./quickfit.ts";
 import { runTestGen } from "./testgen.ts";
 
 export const PICK_SCHEMA = {
@@ -46,7 +50,7 @@ export const REVIEW_SYSTEM =
   "current code. Say why fail, name exact path:line to change. Never call code incomplete when file shown. " +
   "Text ending \"[file cut here\" or \"[diff cut here\" cut for length; files on disk are complete. Short, concrete.";
 
-export type SolvedBy = "rung1" | "rung2" | "pi" | "none";
+export type SolvedBy = "rung1" | "rung1b" | "rung2" | "pi" | "none";
 
 export type ChatFn = (step: string, messages: Message[], opts?: ChatOptions) => Promise<ChatResult>;
 
@@ -96,6 +100,9 @@ export function undoDir(cwd: string, env: Env = process.env, slot = ""): string 
 
 const SOURCE_EXT = /\.(py|js|ts|sh)$/;
 const TEST_FILE = /(^|\/)(tests?|__tests__)\/|(^|\/)test_[^/]*$|[._](test|spec)\.[a-z]+$|_test\.[a-z]+$|(^|\/)conftest\.py$/i;
+
+/** A test file by its path (tests/ dirs, test_*.py, *_test.*, *.test.*, *.spec.*, conftest.py). */
+export const isTestPath = (rel: string): boolean => TEST_FILE.test(rel);
 
 /** The one non-test source file of the tree (repoFiles), or null when there are none or several. */
 export function soleSource(cwd: string, test?: string | null): string | null {
@@ -168,14 +175,33 @@ export interface RestoreResult {
   removed: string[];
 }
 
-/** Put the tree back as the snapshot saw it: changed files rewritten, files created since removed. null = no snapshot. */
-export function restoreSnapshot(cwd: string, env: Env = process.env, slot = ""): RestoreResult | null {
+/** One hash of the tree's non-test text files (path and content), for "the same tree as before" (src/checkpoint.ts). */
+export function treeHash(cwd: string): string {
+  const h = createHash("sha1");
+  for (const f of [...repoFiles(cwd)].sort()) {
+    if (TEST_FILE.test(f)) continue;
+    try {
+      if (statSync(join(cwd, f)).size > MAX_SNAPSHOT_FILE) continue;
+      h.update(f).update("\0").update(readFileSync(join(cwd, f))).update("\0");
+    } catch {
+      // gone between the listing and the read
+    }
+  }
+  return h.digest("hex");
+}
+
+/**
+ * Put the tree back as the snapshot saw it: changed files rewritten, files created since removed. null = no snapshot.
+ * `leave(path)` true: that file is neither rewritten nor removed (the loop's auto-undo never touches test files).
+ */
+export function restoreSnapshot(cwd: string, env: Env = process.env, slot = "", leave?: (rel: string) => boolean): RestoreResult | null {
   const m = readManifest(cwd, env, slot);
   if (!m) return null;
   const dir = join(undoDir(cwd, env, slot), "files");
   const restored: string[] = [];
   const removed: string[] = [];
   for (const f of m.files) {
+    if (leave?.(f)) continue;
     const abs = join(cwd, f);
     const want = readFileSync(join(dir, f));
     let have: Buffer | null = null;
@@ -192,7 +218,7 @@ export function restoreSnapshot(cwd: string, env: Env = process.env, slot = ""):
   }
   const was = new Set(m.files);
   for (const f of repoFiles(cwd)) {
-    if (!was.has(f)) {
+    if (!was.has(f) && !leave?.(f)) {
       rmSync(join(cwd, f), { force: true });
       removed.push(f);
       pruneEmptyDirs(cwd, dirname(f));
@@ -322,7 +348,7 @@ export const better = (a: TestCounts, b: TestCounts): boolean =>
  * What the model is told, once, when the ladder's best tree is kept: the counts, the still-failing tests (at most
  * `maxNames`), the first error line and the rule. Never the reviewer's prose: it describes an earlier tree.
  */
-export function keptText(rung: number, now: TestCounts, lastText: string, maxNames = 8): string {
+export function keptText(rung: number | string, now: TestCounts, lastText: string, maxNames = 8): string {
   const { names, total } = failingNames(lastText, maxNames);
   const more = Math.max(now.failed, total) - names.length;
   const err = firstErrorLine(lastText);
@@ -332,6 +358,43 @@ export function keptText(rung: number, now: TestCounts, lastText: string, maxNam
     (err ? ` First error: ${err.replace(/[.\s]+$/, "")}.` : "") +
     " Edit only what fails. No rewrite."
   );
+}
+
+/**
+ * The second quick try's user message from the best tree (fresh context): the counts, the still-failing tests (at most
+ * `maxNames`), the first error line, the current files, edit blocks only. Terse, as the model reads it at a small window.
+ */
+export function secondTryText(now: TestCounts, lastText: string, files: string, maxNames = 8, tests = ""): string {
+  const { names, total } = failingNames(lastText, maxNames);
+  const more = Math.max(now.failed, total) - names.length;
+  const err = firstErrorLine(lastText);
+  return (
+    `Tree now: ${now.passed}/${now.passed + now.failed} pass.` +
+    (names.length ? ` Still fail: ${names.join(", ")}${more > 0 ? ` (+${more} more)` : ""}.` : "") +
+    (err ? ` First error: ${err.replace(/[.\s]+$/, "")}.` : "") +
+    (tests ? `\n\nFailing tests:\n\n${tests}` : "") +
+    `\n\nFiles now:\n\n${files}\n\nEdit blocks only. Fix what fails. No rewrite.`
+  );
+}
+
+/**
+ * The second try's prompt from the best tree, window-sized: with the code of every still-failing test, else of the first
+ * `maxNames`, else names and first error only, whichever first fits with the reply reserve; null when none fits. dot-dsl
+ * 8k (P4000, gemma-4-12b): rung 1 reached 11/12, the 1b prompt (744 tokens, names and the first error) replied cleanly
+ * but left the last test, a malformed-tuple case that needs the test's code.
+ */
+export function secondTryFit(sys: Message, now: TestCounts, lastText: string, files: string, test: { path: string; text: string } | null, maxNames: number, o: FitOpts): Fit | null {
+  const still = failingNames(lastText, 10_000).names;
+  for (const names of [still, still.slice(0, maxNames), []]) {
+    if (names.length && names.length === still.length && names !== still) continue; // the same list twice
+    const body = names.length && test ? failingTestsCode(test.path, test.text, names) : null;
+    if (names.length && body === null) continue;
+    const fit = fitFixed([sys, { role: "user", content: secondTryText(now, lastText, files, maxNames, body === null ? "" : fence(test!.path, body)) }], o);
+    if (!fit) continue;
+    const cuts = body !== null ? (names.length < still.length ? ["some failing tests"] : []) : still.length && test ? ["failing tests"] : [];
+    return { ...fit, cuts };
+  }
+  return null;
 }
 
 /** Starts the reviewer's part of a rung-3 hand-over text; `handoverText` finds the part to pass back by it. */
@@ -347,7 +410,7 @@ export interface PiHandoff {
 }
 
 /** The phases /fix reports, in order. */
-export const FIX_PHASES = ["reproduce", "pick files", "edit", "review", "second edit", "loop"];
+export const FIX_PHASES = ["reproduce", "pick files", "edit", "review", "second edit", "second try", "loop"];
 
 export interface FixDeps {
   /** progress display (src/progress.ts); absent = none */
@@ -522,7 +585,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
   };
   const pg = deps.progress ?? NOOP_PROGRESS;
   let direct = 0;
-  const call = async (step: string, msgs: Message[], opts: ChatOptions = {}): Promise<string> => {
+  const callR = async (step: string, msgs: Message[], opts: ChatOptions = {}): Promise<ChatResult> => {
     direct++;
     const r = await deps.chat(step, msgs, { ...opts, workflow: "fix", config: cfg, env });
     logReply(env, {
@@ -537,8 +600,9 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
       completion_tokens: r.usage.completion_tokens,
       reply: r.text,
     });
-    return r.text;
+    return r;
   };
+  const call = async (step: string, msgs: Message[], opts: ChatOptions = {}): Promise<string> => (await callR(step, msgs, opts)).text;
   let lastRaw = "";
   const runTest = async (): Promise<TestRun> => {
     const t = await tests({ cwd, test, config: cfg.test });
@@ -548,8 +612,8 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
   const countsOf = (t: TestRun): TestCounts | null => t.counts ?? parseCounts(t.text);
   /** the original tree's test counts, and the best tree a rung left (kept for rung 3 when it beats the original) */
   let orig: TestCounts | null = null;
-  let best: { rung: number; counts: TestCounts; text: string } | null = null;
-  const noteAttempt = (rung: number, t: TestRun): void => {
+  let best: { rung: number | string; counts: TestCounts; text: string } | null = null;
+  const noteAttempt = (rung: number | string, t: TestRun): void => {
     const c = countsOf(t);
     if (!c || !orig || !better(c, best?.counts ?? orig)) return;
     takeSnapshot(cwd, env, BEST_SLOT);
@@ -572,6 +636,26 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
     return { solvedBy, calls, direct, piTurns, diagnosis, handoff, lines };
   };
 
+  const lad = cfg.ladder;
+  const fitOpts = (step: "pick" | "edit", reserve: number, keepOutline = false): FitOpts => ({
+    window: cfg.lanes[cfg.steps[step].lane]?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    reserve,
+    stepMax: cfg.limits.maxTokens[step] ?? 4096,
+    charsPerToken: lad.charsPerToken,
+    keepOutline,
+  });
+  const editOpts = fitOpts("edit", lad.replyReserve);
+  /** one line per quick try: its prompt and reply tokens, finish reason and the test counts after it */
+  const sayTry = (rung: string, fit: Fit, r: ChatResult, t: TestRun): void => {
+    const c = countsOf(t);
+    say(
+      `${rung}: prompt ${r.usage.prompt_tokens} tok (est ${fit.tokens} of ${editOpts.window}), reply ${r.usage.completion_tokens} tok ` +
+        `(max ${fit.maxTokens}), finish ${r.finish ?? "?"}, tests ${c ? `${c.passed}/${c.passed + c.failed}` : "?"}`,
+    );
+  };
+  const sayFit = (rung: string, fit: Fit): void => {
+    if (fit.cuts.length) say(`${rung} fit: cut ${fit.cuts.join(", ")} (est ${fit.tokens} of ${editOpts.window} tok, ${lad.replyReserve} kept for the reply)`);
+  };
   const protectedPaths = test ? [test] : [];
   const trunk = trunkModel(cfg);
   takeSnapshot(cwd, env); // before the first write: `/fix --undo` restores this
@@ -588,27 +672,34 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
     skipToPi = `rungs 1-2 skipped (Adaptive Ladder: ${plan.why}, ${plan.solved}/${plan.runs} rung 1-2 solves)`;
   } else {
     // ---- rung 1
-    const head = ["Repository outline:\n" + outline(cwd)];
     const first = await runTest(); // also the original tree's count, for deciding what rung 3 starts from
     orig = countsOf(first);
-    if (test && isFile(cwd, test)) head.push(showFile(cwd, test), "Test output now:\n" + first.text);
-    msgs = [
-      { role: "system", content: SYSTEM },
-      {
-        role: "user",
-        content:
-          head.join("\n\n") +
-          "\n\nTask:\n" +
-          args.task +
-          '\n\nStep 1: JSON {"files": [max 5 outline paths to read or change], "reason": "..."}. ' +
-          "Include files to create if folder exists.",
-      },
-    ];
+    const shownTest = test && isFile(cwd, test) ? test : null;
+    const failing = failingNames(first.text, 10_000);
+    const qh: QuickHead = {
+      outline: outline(cwd),
+      test: shownTest ? { path: shownTest, text: readFileSync(join(cwd, shownTest)).toString("utf8") } : null,
+      // every failing name, or none: a list cut short would leave failing tests out of the shrunk test file
+      failing: shownTest && orig && failing.total >= orig.failed ? failing.names : [],
+      testOut: shownTest ? first.text : null,
+      task: args.task,
+    };
+    const sys: Message = { role: "system", content: SYSTEM };
     pg.step("pick files");
     // one source file and its tests (an Exercism exercise): no pick call, that file is the pick (dot-dsl 16k: 5 s saved)
-    const only = cfg.ladder.skipSolePick ? soleSource(cwd, test) : null;
-    const raw = only ? JSON.stringify({ files: [only], reason: "only source file" }) : await call("pick", msgs, { schema: PICK_SCHEMA, schemaName: "pick" });
-    if (only) say(`pick skipped: ${only} is the only source file`);
+    const only = lad.skipSolePick ? soleSource(cwd, test) : null;
+    // the pick call needs the outline: the rest of its prompt shrinks to fit, the outline never
+    const pickFit = only ? null : fitHead(qh, (h) => [sys, { role: "user", content: h }], fitOpts("pick", cfg.limits.maxTokens.pick ?? 300, true));
+    let raw = "";
+    if (only) {
+      raw = JSON.stringify({ files: [only], reason: "only source file" });
+      say(`pick skipped: ${only} is the only source file`);
+    } else if (pickFit) {
+      sayFit("pick", pickFit);
+      raw = await call("pick", pickFit.msgs, { schema: PICK_SCHEMA, schemaName: "pick", maxTokens: pickFit.maxTokens });
+    } else {
+      skipToPi = `quick tries skipped (the pick prompt does not fit the ${editOpts.window}-token window with the outline)`;
+    }
     let picked: string[] = [];
     try {
       const j = JSON.parse(raw) as { files?: unknown };
@@ -617,28 +708,37 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
       picked = [];
     }
     const have = picked.filter((p) => isFile(cwd, p));
-    say(`picked: ${JSON.stringify(picked)}`);
+    if (!skipToPi) say(`picked: ${JSON.stringify(picked)}`);
     const missing = [...new Set(picked.filter((p) => !have.includes(p)))].sort();
-    if (cfg.ladder.singleFileOnly.includes(trunk) && picked.length > 1) {
+    const filesMsg =
+      have.map((p) => showFile(cwd, p)).join("\n\n") +
+      (missing.length ? `\n\n(missing, create if needed: ${missing.join(", ")})` : "") +
+      "\n\nStep 2: edit blocks only.";
+    // the edit prompt: everything but the files to edit may shrink; when the files alone leave too little room, Pi's loop
+    const editFit = skipToPi
+      ? null
+      : fitHead(qh, (h) => [sys, { role: "user", content: h }, { role: "assistant", content: raw }, { role: "user", content: filesMsg }], editOpts);
+    if (skipToPi) {
+      // pick prompt did not fit
+    } else if (lad.singleFileOnly.includes(trunk) && picked.length > 1) {
       skipToPi = `rung 1 skipped (${picked.length} files picked, singleFileOnly for ${trunk})`;
+    } else if (!editFit) {
+      skipToPi =
+        `quick tries skipped (${have.length ? have.join(", ") : "the files"} with the shortest task text leave less than ` +
+        `${lad.replyReserve} reply tokens in the ${editOpts.window}-token window)`;
     } else {
-      msgs.push(
-        { role: "assistant", content: raw },
-        {
-          role: "user",
-          content:
-            have.map((p) => showFile(cwd, p)).join("\n\n") +
-            (missing.length ? `\n\n(missing, create if needed: ${missing.join(", ")})` : "") +
-            "\n\nStep 2: edit blocks only.",
-        },
-      );
+      msgs = [...editFit.msgs];
+      const rung1Msgs = [...editFit.msgs];
+      sayFit("rung1", editFit);
       pg.step("edit");
-      reply = await call("edit", msgs);
+      const r1 = await callR("edit", msgs, { maxTokens: editFit.maxTokens });
+      reply = r1.text;
       let res = await applyReply(reply, { cwd, protected: protectedPaths });
       for (const f of res.applied) pg.touch(String(f));
       let t = await runTest();
       out = t.text;
       say(`rung1: applied ${pyList(res.applied)} failed ${pyList(res.failed)} pass ${t.ok}`);
+      sayTry("rung1", editFit, r1, t);
       if (t.ok) {
         await lint();
         return done("rung1", 0, null, null);
@@ -646,9 +746,9 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
       noteAttempt(1, t);
 
       // ---- rung 2
-      if (cfg.ladder.rung2) {
+      if (lad.rung2) {
         pg.step("review");
-        diag = await reviewCall(out, lastRaw, workingDiff(cwd, env), cwd, call, cfg.ladder);
+        diag = await reviewCall(out, lastRaw, workingDiff(cwd, env), cwd, call, lad);
         say(`review: ${JSON.stringify(diag)}`);
         msgs.push(
           { role: "assistant", content: reply },
@@ -674,6 +774,48 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
         }
         noteAttempt(2, t);
       }
+
+      // ---- rung 1b: the second quick try
+      if (lad.secondTry) {
+        const b = best as { rung: number | string; counts: TestCounts; text: string } | null;
+        const lane = cfg.lanes[cfg.steps.edit.lane];
+        let fit: Fit | null = null;
+        let seed: number | undefined;
+        let why: string;
+        if (b) {
+          // a rung beat the original: continue from its tree, a fresh context with what still fails and the files now
+          restoreSnapshot(cwd, env, BEST_SLOT);
+          const paths = [...new Set([...have, ...changedSinceSnapshot(cwd, env)])].filter((p) => p !== test && isFile(cwd, p));
+          const testText = shownTest ? readFileSync(join(cwd, shownTest)).toString("utf8") : "";
+          fit = secondTryFit(sys, b.counts, b.text, paths.map((p) => showFile(cwd, p)).join("\n\n"), shownTest ? { path: shownTest, text: testText } : null, lad.keptFailNames, editOpts);
+          why = fit ? `from the rung ${b.rung} tree (${b.counts.passed}/${b.counts.passed + b.counts.failed} pass)` : "the files of the best tree do not fit the window";
+        } else if (!(lane?.temperature ?? 0)) {
+          why = "no rung beat the original, and at temperature 0 a fresh sample repeats rung 1";
+        } else {
+          // nothing gained: the rung-1 edit sampled again from the original tree, another seed when one is set
+          restoreSnapshot(cwd, env);
+          seed = lane?.seed !== undefined ? lane.seed + 1 : undefined;
+          fit = { ...editFit, msgs: rung1Msgs };
+          why = `a fresh sample of the rung-1 edit from the original tree${seed !== undefined ? `, seed ${seed}` : ""}`;
+        }
+        if (!fit) say(`rung1b: skipped (${why})`);
+        else {
+          say(`rung1b: ${why}`);
+          sayFit("rung1b", fit);
+          pg.step("second try");
+          const r2 = await callR("edit", fit.msgs, { maxTokens: fit.maxTokens, ...(seed !== undefined ? { seed } : {}) });
+          res = await applyReply(r2.text, { cwd, protected: protectedPaths });
+          for (const f of res.applied) pg.touch(String(f));
+          t = await runTest();
+          say(`rung1b: applied ${pyList(res.applied)} failed ${pyList(res.failed)} pass ${t.ok}`);
+          sayTry("rung1b", fit, r2, t);
+          if (t.ok) {
+            await lint();
+            return done("rung1b", 0, diag, null);
+          }
+          noteAttempt("1b", t);
+        }
+      }
     }
   }
 
@@ -684,7 +826,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
   }
   if (skipToPi) say(skipToPi);
   // keep the best tree the ladder produced when it beats the original; else start from the original
-  const keep = cfg.ladder.keepBest ? (best as { rung: number; counts: TestCounts; text: string } | null) : null;
+  const keep = cfg.ladder.keepBest ? (best as { rung: number | string; counts: TestCounts; text: string } | null) : null;
   const kept = keep && orig ? keptText(keep.rung, keep.counts, keep.text, cfg.ladder.keptFailNames) : null;
   const back = keep && kept ? restoreSnapshot(cwd, env, BEST_SLOT) : restoreSnapshot(cwd, env);
   if (kept) say(kept);

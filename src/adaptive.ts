@@ -65,7 +65,7 @@ export function readRuns(env: Env = process.env): RunRecord[] {
 export function decide(mode: Config["ladder"]["mode"], a: Adaptive, model: string, runs: RunRecord[]): Decision {
   const mine = runs.filter((r) => r.model === model);
   const ladderRuns = mine.filter((r) => (r.started ?? "ladder") === "ladder").slice(-a.minRuns);
-  const solved = ladderRuns.filter((r) => r.solved_by === "rung1" || r.solved_by === "rung2").length;
+  const solved = ladderRuns.filter((r) => r.solved_by === "rung1" || r.solved_by === "rung1b" || r.solved_by === "rung2").length;
   const base = { solved, runs: ladderRuns.length };
   if (mode === "ladder") return { start: "ladder", why: "mode ladder", ...base };
   if (mode === "pi") return { start: "pi", why: "mode pi", ...base };

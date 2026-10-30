@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { BestTree } from "../../src/besttree.ts";
-import { buildNote, Checkpointer, cleaned, headEnd, milestoneOf, NOTE_MAX_CHARS, pairingOk, requestStart, requestText, touchedFiles, turnOf, type CheckpointCtx, type CheckpointInfo } from "../../src/checkpoint.ts";
+import { BACKOFF_MAX, buildNote, Checkpointer, cleaned, editedBefore, headEnd, keptTurn, milestoneOf, NOTE_MAX_CHARS, pairingOk, requestStart, requestText, touchedFiles, turnOf, type CheckpointCtx, type CheckpointInfo } from "../../src/checkpoint.ts";
 import { DEFAULTS, mergeConfig } from "../../src/config.ts";
-import { contextTokens, lineTokens, Masker, sizeTokens, usableTokens, type Msg } from "../../src/limits.ts";
-import { loadFixture, replay } from "./replay-helper.ts";
+import { contextTokens, KEPT_REREAD, lineTokens, Masker, ReadMemory, sizeTokens, usableTokens, windowHash, workingSet, type Msg } from "../../src/limits.ts";
+import { loadFixture, replay, undoReplay, V2_LIMITS, type ReplayCall } from "./replay-helper.ts";
 
 // ---------------------------------------------------------------- a synthetic Pi loop
 
@@ -234,6 +234,14 @@ test("usableTokens / lineTokens: Pi's 4096 clamp plus the reply reserve caps eve
   assert.equal(lineTokens(4096, 0.7, 2048), 0.7 * 4096, "a window too small for the line keeps the share");
 });
 
+test("limits.checkpointKeepFiles / checkpointBackoff / undoWorse: defaults on, validation", () => {
+  assert.deepEqual([DEFAULTS.limits.checkpointKeepFiles, DEFAULTS.limits.checkpointBackoff, DEFAULTS.limits.checkpointSkipSame, DEFAULTS.limits.undoWorse, DEFAULTS.limits.undoWorseFrom], [0.25, true, true, true, 2]);
+  const off = mergeConfig({ limits: { checkpointKeepFiles: 0, checkpointBackoff: false, undoWorse: false } }).limits;
+  assert.deepEqual([off.checkpointKeepFiles, off.checkpointBackoff, off.undoWorse], [0, false, false]);
+  for (const [k, bad] of [["checkpointKeepFiles", 1], ["checkpointKeepFiles", -0.1], ["checkpointKeepFiles", "0.2"], ["checkpointBackoff", 1], ["checkpointSkipSame", "no"], ["undoWorse", "yes"], ["undoWorseFrom", 0], ["undoWorseFrom", 1.5]] as const)
+    assert.throws(() => mergeConfig({ limits: { [k]: bad } }), new RegExp(`limits\\.${k}`));
+});
+
 test("limits.outputReserve / checkpointAt / checkpointMinSave / checkpointGap: defaults and validation", () => {
   assert.deepEqual([DEFAULTS.limits.outputReserve, DEFAULTS.limits.checkpointAt, DEFAULTS.limits.checkpointMinSave, DEFAULTS.limits.checkpointGap], [2048, 0.55, 0.1, 4]);
   assert.equal(mergeConfig({ limits: { checkpointAt: 0 } }).limits.checkpointAt, 0);
@@ -246,7 +254,7 @@ test("limits.outputReserve / checkpointAt / checkpointMinSave / checkpointGap: d
 test("replay paasio 16k: checkpoints at the run's milestones; every request paired, request and last turn kept; much smaller", (t) => {
   const fx = loadFixture("paasio16-tinycode.json");
   const before = replay(fx, false);
-  const after = replay(fx, true);
+  const after = replay(fx, true, V2_LIMITS); // the v2 rules this test was written for (the steadiness rules: below)
   assert.equal(before.length, fx.recorded.length, "one replayed call per recorded loop call");
   // the baseline replay tracks the recorded requests (the recorded chars count the JSON body, so they run a little higher)
   for (let i = 0; i < before.length; i++) assert.ok(Math.abs(before[i]!.chars - fx.recorded[i]!.prompt_chars) < 0.16 * fx.recorded[i]!.prompt_chars, `call ${i + 1}`);
@@ -299,4 +307,230 @@ test("regression: a request the checkpoint cannot cut (one huge last turn) is st
   const out = m.apply(ms, { windowTokens: 16384, systemChars: 0, ceilingTokens: usableTokens(16384, 2048) });
   assert.ok(out && m.pressureBatches === 1, "pressure batch by characters");
   assert.ok(pairingOk(out));
+});
+
+// ---------------------------------------------------------------- steadiness: kept files
+
+/** a loop where the model edits a.py (relative and absolute names) and b.py, then runs the tests */
+function editSession(n: number, size = 4000): Msg[] {
+  const ms: Msg[] = [user("Fix it.\nEdit a.py so that the tests in t_test.py pass."), { role: "custom", customType: "tinycode-hint", content: "hint" }, call("tc_direct_1", "fix", { task: "Fix it." }), result("tc_direct_1", "fix", "fix blocked: no rung solved it")];
+  for (let i = 0; i < n; i++) {
+    ms.push(call(`r${i}`, "read", { path: "/w/t_test.py" }, "Reading."), result(`r${i}`, "read", "x".repeat(size)));
+    ms.push(call(`b${i}`, "edit", { path: "/w/b.py", edits: [{ oldText: "o", newText: "n" }] }), result(`b${i}`, "edit", "Successfully replaced 1 block(s)."));
+    ms.push(call(`e${i}`, "edit", { path: "/w/a.py", edits: [{ oldText: "o".repeat(300), newText: "n".repeat(300) }] }), result(`e${i}`, "edit", "Successfully replaced 1 block(s)."));
+    ms.push(call(`t${i}`, "run_tests"), result(`t${i}`, "run_tests", FAIL(10 + i, 10 - i)));
+  }
+  return ms;
+}
+const disk: Record<string, string> = { "/w/a.py": "def a():\n    return 1\n", "/w/b.py": "B = 2\n", "/w/t_test.py": "assert a() == 2\n" };
+
+test("editedBefore: successful edits before the cut, most recent first; a failed edit and a file edited again in the kept part are left out", () => {
+  const ms = [user("q"), call("e1", "edit", { path: "a.py" }), result("e1", "edit", "ok"), call("e2", "write", { path: "b.py" }), result("e2", "write", "ok"), call("e3", "edit", { path: "c.py" }), result("e3", "edit", "no match", true), call("e4", "edit", { path: "a.py" }), result("e4", "edit", "ok"), call("t", "run_tests"), result("t", "run_tests", FAIL(1, 1)), call("e5", "edit", { path: "b.py" }), result("e5", "edit", "ok")];
+  assert.deepEqual(editedBefore(ms.slice(0, -2), 0, turnOf(ms, "t")), ["a.py", "b.py"], "a.py last edited after b.py; c.py's edit failed");
+  assert.deepEqual(editedBefore(ms, 0, turnOf(ms, "t")), ["a.py"], "b.py is edited again in the kept part: its edit is there");
+  assert.deepEqual(editedBefore(ms, 3, turnOf(ms, "t")), ["a.py"], "only the request's edits (from `from` on)");
+  const two = [user("q"), call("e1", "edit", { path: "/w/a.py" }), result("e1", "edit", "ok"), call("e2", "edit", { path: "b.py" }), result("e2", "edit", "ok"), call("e3", "edit", { path: "a.py" }), result("e3", "edit", "ok"), call("t", "run_tests"), result("t", "run_tests", FAIL(1, 1))];
+  const key = (p: string) => (p.startsWith("/w/") ? p : `/w/${p}`);
+  assert.deepEqual(editedBefore(two, 0, turnOf(two, "t"), key), ["a.py", "b.py"], "two names of one file: once, by its latest name");
+  assert.deepEqual(keptTurn([], 1, ms[1]), []);
+});
+
+test("kept files: the cleaned list carries the edited files' current text as one read turn after the note; pairing valid; the note says so", () => {
+  const ms = editSession(6);
+  const ck = new Checkpointer(0.55, 0.1, 4, { keepFiles: 0.25 });
+  ck.tests("best", "t5");
+  let keptSeen: string[] = [];
+  const out = ck.apply(ms, ctxFor({ fileText: (p) => disk[p] ?? null, note: (_s, kept) => ((keptSeen = kept), `[checkpoint] kept ${kept.join(",")}`) }))!;
+  assert.ok(out && ck.last);
+  assert.ok(pairingOk(out));
+  assert.deepEqual(keptSeen, ["/w/a.py", "/w/b.py"], "most recently edited first");
+  assert.deepEqual(ck.last.kept.map((f) => f.path), ["/w/a.py", "/w/b.py"]);
+  // head (4) + note + the kept turn (1 call message, 2 results) + the milestone's turn (2)
+  assert.deepEqual(out.map((m) => m.role), ["user", "custom", "assistant", "toolResult", "user", "assistant", "toolResult", "toolResult", "assistant", "toolResult"]);
+  const keep = out[5]!;
+  assert.deepEqual((keep.content as { name: string; arguments: unknown }[]).map((p) => [p.name, p.arguments]), [["read", { path: "/w/a.py" }], ["read", { path: "/w/b.py" }]]);
+  assert.equal(((out[6]!.content as { text: string }[])[0]!).text, disk["/w/a.py"]);
+  assert.equal((keep.usage as { input: number }).input, 0, "no stale usage on the made-up turn");
+  assert.equal(keep.stopReason, "toolUse");
+  assert.ok(workingSet(out).has(out[6]!.toolCallId as string), "the kept reads are the working set: masking keeps them");
+  // the next call: the same kept text (frozen), so the prefix stays the same
+  disk["/w/a.py"] = "changed later\n";
+  const again = ck.apply([...ms, call("x", "read", { path: "/w/c.py" }), result("x", "read", "c")], ctxFor({ fileText: (p) => disk[p] ?? null }))!;
+  assert.deepEqual(again.slice(0, out.length), out);
+  disk["/w/a.py"] = "def a():\n    return 1\n";
+  // the note: kept files named, no "read before edit" for them
+  const note = buildNote({ request: "Edit a.py.", best: null, bestRun: 0, last: null, lastText: "", showTests: false, kept: ["a.py", "b.py"], files: [], steps: [], notes: [] });
+  assert.match(note, /^\[checkpoint\] Older steps removed\. Current text below: a\.py, b\.py\. Other files: read before edit\./);
+});
+
+test("kept files: within the share of the usable prompt, most recent first, whole or not at all; too long or unreadable files skipped; off = as before", () => {
+  const ms = editSession(6);
+  const big: Record<string, string> = { "/w/a.py": "a".repeat(5000), "/w/b.py": "b".repeat(300) };
+  const ck = new Checkpointer(0.55, 0.1, 4, { keepFiles: 0.1 }); // 1024 tokens of 10240
+  ck.tests("best", "t5");
+  ck.apply(ms, ctxFor({ fileText: (p) => big[p] ?? null }));
+  assert.deepEqual(ck.last?.kept.map((f) => f.path), ["/w/b.py"], "a.py (~1250 tokens) does not fit, b.py does");
+  const long = new Checkpointer(0.55, 0.1, 4, { keepFiles: 0.25 });
+  long.tests("best", "t5");
+  long.apply(ms, ctxFor({ fileText: (p) => (p === "/w/a.py" ? "x\n".repeat(400) : null), maxFileLines: 300 }));
+  assert.deepEqual(long.last?.kept, [], "over maxFileLines, and b.py unreadable");
+  const off = new Checkpointer(0.55, 0.1, 4);
+  off.tests("best", "t5");
+  const plain = off.apply(ms, ctxFor({ fileText: (p) => disk[p] ?? null }))!;
+  assert.deepEqual(off.last?.kept, []);
+  assert.equal(plain.length, 4 + 1 + 2, "keepFiles 0: the v2 list");
+});
+
+test("kept files: never over the usable line for them; the cut is then made without them (backstop kept)", () => {
+  const ms = session(12, 3000); // over the usable line: the backstop
+  const ck = new Checkpointer(0.55, 0.1, 4, { keepFiles: 0.9 });
+  const huge = "y".repeat(39000); // ~9750 tokens: with it the list stays over 10240
+  const out = ck.apply(ms, ctxFor({ fileText: () => huge }))!;
+  assert.equal(ck.last?.kind, "pressure");
+  assert.deepEqual(ck.last?.kept, [], "made without the kept file");
+  assert.ok(sizeTokens(out, 2000) < usableTokens(16384, 2048));
+  assert.ok(pairingOk(out));
+});
+
+test("read memory: a kept file counts as served; a re-read gets the kept pointer once (no intervention), then is served; an edited window is served at once", () => {
+  const r = new ReadMemory();
+  const text = Array.from({ length: 150 }, (_, i) => `line ${i + 1}`).join("\n");
+  r.serve("/w/a.py", text, 7, 100);
+  assert.equal(r.check(ReadMemory.key("/w/a.py", {}, 100), 8, windowHash(text, 1, 100)), KEPT_REREAD);
+  assert.equal(r.keptHit, true, "a pointer that is always true: not counted toward stepBackAt");
+  assert.equal(r.check(ReadMemory.key("/w/a.py", {}, 100), 9, windowHash(text, 1, 100)), null, "asked again: served");
+  assert.equal(r.check(ReadMemory.key("/w/a.py", { offset: 101 }, 100), 9, windowHash(text, 101, 100)), KEPT_REREAD, "the second window too");
+  assert.equal(r.check(ReadMemory.key("/w/a.py", { offset: 101 }, 100), 10, "changed"), null);
+  assert.equal(r.check(ReadMemory.key("/w/b.py", {}, 100), 10, "h"), null);
+  assert.equal(r.keptHit, false);
+  assert.match(r.check(ReadMemory.key("/w/b.py", {}, 100), 11, "h") ?? "", /^Unchanged since your read at turn 10/, "an ordinary read: the ordinary pointer");
+  assert.equal(r.keptHit, false);
+});
+
+// ---------------------------------------------------------------- steadiness: back-off
+
+test("back-off: nextGap doubles within 2x the gap (capped), resets after a quiet stretch", () => {
+  assert.equal(Checkpointer.nextGap(4, 4, Number.POSITIVE_INFINITY), 4, "the first checkpoint");
+  assert.equal(Checkpointer.nextGap(4, 4, 5), 8);
+  assert.equal(Checkpointer.nextGap(8, 4, 10), 16);
+  assert.equal(Checkpointer.nextGap(16, 4, 31), 16, "at most BACKOFF_MAX x the base");
+  assert.equal(BACKOFF_MAX, 4);
+  assert.equal(Checkpointer.nextGap(16, 4, 32), 4, "2x the gap or more: quiet, back to the base");
+  assert.equal(Checkpointer.nextGap(5, 5, 9), 10);
+  assert.equal(Checkpointer.nextGap(4, 4, 8), 4);
+});
+
+test("back-off: milestone checkpoints close together space out; the backstop still cuts over the usable line; a new request resets the gap", () => {
+  // a low gate (0.1 of the usable prompt) so every milestone is over it: only the gap decides; never near the usable line
+  const run = (backoff: boolean) => {
+    const ck = new Checkpointer(0.1, 0.01, 4, { backoff });
+    let ms = session(6);
+    const at: number[] = [];
+    for (let i = 6; i < 60; i++) {
+      ms = [...ms, call(`e${i}`, "edit", { path: "/w/a.py" }), result(`e${i}`, "edit", "ok"), call(`t${i}`, "run_tests"), result(`t${i}`, "run_tests", "x".repeat(1200) + FAIL(16, 4))];
+      ck.tests("steady", `t${i}`);
+      ck.apply(ms, ctxFor());
+      if (ck.last) {
+        assert.equal(ck.last.kind, "steady");
+        at.push(i);
+      }
+      ck.apply(ms, ctxFor()); // the edit call in between
+    }
+    return { at, ck };
+  };
+  const plain = run(false);
+  const backed = run(true);
+  assert.ok(plain.at.length >= 8, `v2: ${plain.at.join(",")}`);
+  assert.ok(backed.at.length < plain.at.length / 2, `back-off: ${backed.at.join(",")} vs ${plain.at.join(",")}`);
+  const gaps = backed.at.slice(1).map((x, i) => x - backed.at[i]!);
+  assert.ok(gaps.every((g, i) => i === 0 || g >= gaps[i - 1]!), `spacing grows: ${gaps.join(",")}`);
+  assert.ok(gaps.at(-1)! > gaps[0]!, `spacing grows: ${gaps.join(",")}`);
+  assert.equal(backed.ck.gap, 16, "capped at 4x");
+  // the backstop ignores the gap
+  const ck = new Checkpointer(0.55, 0.1, 4, { backoff: true });
+  ck.tests("best", "t5");
+  ck.apply(session(6), ctxFor());
+  const big = session(12, 3000);
+  assert.ok(ck.apply(big, ctxFor()) && ck.last?.kind === "pressure", "over the line: cut at once");
+  ck.apply([...big, user("Next request.")], ctxFor());
+  assert.equal(ck.gap, 4, "a new request: base gap");
+});
+
+// ---------------------------------------------------------------- steadiness: replay of the two capped 16k runs
+
+const cpCalls = (r: ReplayCall[]): string[] => r.filter((c) => c.checkpoint).map((c) => `${c.call}:${c.checkpoint!.kind}`);
+const peak = (r: ReplayCall[]): number => Math.max(...r.map((c) => c.chars));
+
+for (const [name, task, want] of [
+  // v2 replays the recorded run's checkpoints: 16 (dot-dsl) and 14 (bowling), as in their tinycode-calls.jsonl
+  // v2: 10 of dot-dsl's 16 and 9 of bowling's 14 checkpoints were made on the tree of the checkpoint before
+  ["dotdsl16-r3-tinycode.json", "dot-dsl r3", { v2: 16, steady: 7, v2Same: 10 }],
+  ["bowling16-r3-tinycode.json", "bowling r3", { v2: 14, steady: 4, v2Same: 9 }],
+] as const) {
+  test(`replay ${task} 16k (capped at 10 min with v2): the steadiness rules make far fewer checkpoints; paired, request and last turn kept, under the usable line`, (t) => {
+    const fx = loadFixture(name);
+    assert.equal(JSON.stringify(fx).includes("/" + "home/"), false, "paths scrubbed");
+    const v2 = replay(fx, true, V2_LIMITS);
+    const steady = replay(fx, true);
+    assert.equal(v2.length, fx.recorded.length);
+    assert.equal(cpCalls(v2).length, want.v2, `v2: ${cpCalls(v2).join(" ")}`);
+    assert.equal(cpCalls(steady).length, want.steady, `steady: ${cpCalls(steady).join(" ")}`);
+    for (const c of steady) assert.ok(c.valid && c.requestKept && c.lastTurnKept, `call ${c.call}`);
+    const sameAsPrev = (r: ReplayCall[], milestonesOnly: boolean) => {
+      const cps = r.filter((c) => c.checkpoint);
+      return cps.filter((c, i) => i > 0 && c.tree === cps[i - 1]!.tree && (!milestonesOnly || c.checkpoint!.kind !== "pressure")).length;
+    };
+    assert.equal(sameAsPrev(v2, false), want.v2Same, "the identical-state cycle in the recorded run");
+    assert.equal(sameAsPrev(steady, true), 0, "no milestone checkpoint on the tree of the one before: the cycle is broken");
+    const noSkip = replay(fx, true, { ...DEFAULTS.limits, checkpointSkipSame: false });
+    const usableChars = usableTokens(fx.window, DEFAULTS.limits.outputReserve) * 4;
+    assert.ok(peak(steady) < usableChars + fx.toolsChars + fx.systemChars, `peak ${peak(steady)} chars`);
+    const kept = steady.filter((c) => c.checkpoint?.kept.length).length;
+    assert.ok(kept >= Math.ceil(want.steady / 2), `kept files at ${kept} of ${want.steady} checkpoints`);
+    const u = undoReplay(fx);
+    t.diagnostic(`${task}: without the same-tree skip ${cpCalls(noSkip).length} checkpoints, ${sameAsPrev(noSkip, true)} on the previous tree; with it ${sameAsPrev(steady, true)}; backstop cuts ${steady.filter((c) => c.checkpoint?.kind === "pressure").length}`);
+    t.diagnostic(`${task}: checkpoints ${want.v2} -> ${want.steady}; peak request ${peak(v2)} -> ${peak(steady)} chars (~${Math.ceil(peak(v2) / 4)} -> ~${Math.ceil(peak(steady) / 4)} tokens); kept files at ${kept}`);
+    t.diagnostic(`${task}: v2 ${cpCalls(v2).join(" ")}`);
+    t.diagnostic(`${task}: steady ${steady.filter((c) => c.checkpoint).map((c) => `${c.call}:${c.checkpoint!.kind}${c.checkpoint!.kept.length ? "+kept" : ""}`).join(" ")}`);
+    t.diagnostic(`${task}: auto-undo would fire at test runs ${u.undos.join(",")} of ${u.runs}${u.guard ? `, guard at ${u.guard}` : ""} (only the first is an exact replay)`);
+  });
+}
+
+test("replay paasio 16k with the steadiness rules: still 3 checkpoints, same peak (a run that passed is not slowed by them)", () => {
+  const fx = loadFixture("paasio16-tinycode.json");
+  const v2 = replay(fx, true, V2_LIMITS);
+  const steady = replay(fx, true);
+  assert.equal(cpCalls(steady).length, 3, cpCalls(steady).join(" "));
+  assert.equal(peak(steady), peak(v2));
+  for (const c of steady) assert.ok(c.valid && c.requestKept && c.lastTurnKept, `call ${c.call}`);
+});
+
+// ---------------------------------------------------------------- steadiness: same tree
+
+test("same tree: a steady milestone on the tree of the last checkpoint is skipped; a new best, another tree, off, or no hash are not", () => {
+  // a low gate (0.1 of the usable prompt): every milestone is over it; results small enough to stay off the backstop
+  const ck = new Checkpointer(0.1, 0.01, 1, { skipSame: true });
+  let ms = session(6);
+  ck.tests("best", "t5", "T1");
+  assert.ok(ck.apply(ms, ctxFor()) && ck.last, "the first checkpoint, on tree T1");
+  const turn = (i: number, tree: string | undefined, kind: "steady" | "best" = "steady") => {
+    ms = [...ms, call(`e${i}`, "edit", { path: "/w/a.py" }), result(`e${i}`, "edit", "ok"), call(`t${i}`, "run_tests"), result(`t${i}`, "run_tests", "x".repeat(2000) + FAIL(16, 4))];
+    ck.tests(kind, `t${i}`, tree);
+    ck.apply(ms, ctxFor());
+    return ck.last?.kind ?? null;
+  };
+  assert.equal(turn(6, "T1"), null, "same tree: skipped");
+  assert.deepEqual([ck.lastSkipped, ck.skipped, ck.hasPending], [true, 1, false]);
+  assert.equal(turn(7, "T2"), "steady", "another tree: a checkpoint");
+  assert.equal(ck.lastSkipped, false);
+  assert.equal(turn(8, "T2"), null, "and now T2 is the last checkpoint's tree");
+  assert.equal(turn(9, "T2", "best"), "best", "a new best is never skipped");
+  assert.equal(turn(10, undefined), "steady", "no hash: as before");
+  const off = new Checkpointer(0.55, 0.1, 1);
+  off.tests("best", "t5", "T1");
+  off.apply(session(6), ctxFor());
+  off.tests("steady", "t5", "T1");
+  assert.equal(off.lastSkipped, false, "skipSame off");
+  ck.reset();
+  assert.equal(ck.skipped, 0);
 });

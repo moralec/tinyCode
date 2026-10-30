@@ -41,6 +41,7 @@ const TABLE: Record<string, [string, string]> = {
   merge: ["merging the review notes", "merge the review notes"],
   edit: ["editing the file", "edit the file"],
   "second edit": ["making a second attempt at the edit", "make a second attempt"],
+  "second try": ["making a second quick try", "make a second quick try"],
   baseline: ["running a baseline test", "run a baseline test"],
   "write tests": ["writing the tests", "write the tests"],
   "run tests": ["running the new tests", "run the new tests"],

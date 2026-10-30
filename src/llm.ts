@@ -43,6 +43,8 @@ export interface ChatOptions {
   schemaName?: string;
   /** overrides limits.maxTokens[step] */
   maxTokens?: number;
+  /** overrides the lane's seed for this call (the ladder's second quick try samples with seed + 1) */
+  seed?: number;
   workflow?: string | null;
   config?: Config;
   transport?: Transport;
@@ -104,7 +106,8 @@ async function attempt(
     temperature: lane.temperature ?? 0,
     chat_template_kwargs: { enable_thinking: false },
   };
-  if (lane.seed !== undefined) body.seed = lane.seed;
+  const seed = opts.seed ?? lane.seed;
+  if (seed !== undefined) body.seed = seed;
   if (maxTokens !== undefined) body.max_tokens = maxTokens;
   if (opts.schema) {
     body.response_format = {

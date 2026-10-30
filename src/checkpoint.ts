@@ -20,6 +20,21 @@
 // made at the last turn, milestone or not, gap ignored (paasio 16k died at ~12.1k of 16.4k, Pi's clamp left 203 then 1
 // output tokens).
 // Cache: a checkpoint changes the history after the head once; the head (system + request) stays the same prefix.
+//
+// Steadiness (operator 2026-10-30). dot-dsl 16k r3 hit the 10-minute cap with 16 checkpoints in 114 calls, bowling r3
+// with 14 in 78: each "steady" checkpoint dropped the edited file, the model read it again (dot-dsl: the source and both
+// test windows, 52 reads), made the same edit, and the cleaned list came out the same as the last time (dot-dsl
+// 6735 -> 3474 tokens nine times in a row, bowling 7031 -> 3948 four times), so the same cycle ran again. Two rules:
+//   - kept files (limits.checkpointKeepFiles): the cleaned list carries the current text of the files this request
+//     edited as one read turn after the note (most recently edited first, up to a share of the usable prompt, a file
+//     whole or not at all); the extension marks those reads as served, so a re-read is pointed at them;
+//   - back-off (limits.checkpointBackoff): a milestone checkpoint within 2x the gap of the last one doubles the gap
+//     for the next, up to BACKOFF_MAX x checkpointGap; a later one resets it. The backstop at the usable line still
+//     ignores the gap. Replay (test/unit/checkpoint.test.ts): uncapped, dot-dsl r3 rode the usable line (3 backstop
+//     cuts, peak ~10.2k tokens); capped at 4x, 8 milestone checkpoints and a peak of ~8.9k.
+//   - same tree (limits.checkpointSkipSame): a "steady" milestone whose working tree (non-test files, hashed) is the
+//     tree of the last checkpoint is no milestone: the cut would rebuild the very list the model just looped from, so
+//     the history of that loop stays in view instead (the backstop still applies).
 import { better } from "./workflows/fix.ts";
 import { msgText } from "./compact.ts";
 import { approxTokens, contextTokens, LOOP_TOOL_NAMES, sizeTokens, type Msg, type TodoStep } from "./limits.ts";
@@ -108,7 +123,7 @@ const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalToke
  * it is a user message after the head's tool result. Assistant messages in `stale` lose their usage in the copy: it is the
  * size of the prompt before the cut, and Pi's output clamp and tinyCode's estimates would read it as the size now.
  */
-export function cleaned(messages: Msg[], head: number, cut: number, note: string, stale: Set<string> = new Set()): Msg[] {
+export function cleaned(messages: Msg[], head: number, cut: number, note: string, stale: Set<string> = new Set(), keep: Msg[] = []): Msg[] {
   const out = messages.slice(0, head);
   const last = out[out.length - 1];
   if (last && typeof last.summary === "string" && last.content === undefined) {
@@ -120,8 +135,42 @@ export function cleaned(messages: Msg[], head: number, cut: number, note: string
     out.push({ role: "user", content: [{ type: "text", text: note }], timestamp: Number(messages[cut]?.timestamp ?? Date.now()) - 1 });
   }
   out.push(...messages.slice(head, cut).filter((m) => m.role === "system"));
+  out.push(...keep);
   for (const m of messages.slice(cut)) out.push(m.role === "assistant" && stale.has(asstId(m)) ? { ...m, usage: ZERO_USAGE } : m);
   return out;
+}
+
+/**
+ * Files the request's tool calls edited successfully (edit/write with a result that is no error) before `cut`, most
+ * recently edited first, as the call named them. A file edited again at or after `cut` is left out: the kept part shows
+ * that edit, and a text taken now would already contain it. `key` makes two names of one file one (a.py, /w/a.py): the
+ * most recent name is returned.
+ */
+export function editedBefore(messages: Msg[], from: number, cut: number, key: (path: string) => string = (p) => p): string[] {
+  const ok = new Set(messages.filter((m) => m.role === "toolResult" && !m.isError).map((m) => m.toolCallId));
+  const last = new Map<string, { path: string; i: number }>();
+  const later = new Set<string>();
+  messages.forEach((m, i) => {
+    if (i < from) return;
+    for (const p of calls(m)) {
+      if (p.name !== "edit" && p.name !== "write") continue;
+      const raw = p.arguments?.path ?? p.arguments?.file_path;
+      if (typeof raw !== "string" || !raw || !ok.has(p.id)) continue;
+      if (i >= cut) later.add(key(raw));
+      else last.set(key(raw), { path: raw, i });
+    }
+  });
+  return [...last].filter(([k]) => !later.has(k)).sort((a, b) => b[1].i - a[1].i).map(([, v]) => v.path);
+}
+
+/** One read turn holding `files` (path as the model named it, text), ids `tc_keep_<n>_<i>`; [] for none. */
+export function keptTurn(files: { path: string; text: string }[], n: number, like: Msg | undefined): Msg[] {
+  if (!files.length) return [];
+  const ts = Number(like?.timestamp ?? Date.now()) - 1;
+  const ids = files.map((_, i) => `tc_keep_${n}_${i}`);
+  const asst: Msg = { role: "assistant", content: files.map((f, i) => ({ type: "toolCall", id: ids[i], name: "read", arguments: { path: f.path } })), usage: ZERO_USAGE, stopReason: "toolUse", timestamp: ts };
+  for (const k of ["api", "provider", "model"]) if (like && like[k] !== undefined) asst[k] = like[k];
+  return [asst, ...files.map((f, i): Msg => ({ role: "toolResult", toolCallId: ids[i], toolName: "read", content: [{ type: "text", text: f.text }], isError: false, timestamp: ts }))];
 }
 
 const asstId = (m: Msg): string => `${String(m.timestamp ?? "")}|${calls(m).map((p) => p.id ?? "").join(",")}`;
@@ -139,6 +188,8 @@ export interface NoteInput {
   lastText: string;
   /** false when the kept turn already shows the last test output (then no fail names / first error here) */
   showTests: boolean;
+  /** files whose current text follows the note (kept files); absent or empty: "read before edit" */
+  kept?: string[];
   files: { path: string; edited: boolean }[];
   steps: TodoStep[];
   notes: string[];
@@ -171,7 +222,11 @@ export function requestText(m: Msg | undefined): string {
 
 /** The checkpoint note: terse, code-built, at most NOTE_MAX_CHARS. */
 export function buildNote(i: NoteInput): string {
-  const lines = ["[checkpoint] Older steps removed. Files on disk are current: read before edit."];
+  const lines = [
+    i.kept?.length
+      ? `[checkpoint] Older steps removed. Current text below: ${i.kept.map((k) => clip(k, 80)).join(", ")}. Other files: read before edit.`
+      : "[checkpoint] Older steps removed. Files on disk are current: read before edit.",
+  ];
   const ask = i.request.split("\n").map((l) => l.trim()).filter(Boolean).pop();
   if (ask) lines.push(`Task: ${clip(ask, 160)}`);
   if (i.best) {
@@ -222,6 +277,10 @@ export interface CheckpointInfo {
   /** messages taken out of what is sent */
   removed: number;
   noteChars: number;
+  /** the files kept whole after the note (path as the model named it, text) */
+  kept: { path: string; text: string }[];
+  /** the milestone gap now in force (back-off) */
+  gap: number;
 }
 
 export interface CheckpointCtx {
@@ -233,8 +292,26 @@ export interface CheckpointCtx {
   milestones?: boolean;
   /** the list as masking will send it (Masker.view), so the saving counted is the one the model sees; default: as is */
   view?: (messages: Msg[]) => Msg[];
-  /** the note for a checkpoint made now; `showTests` = false when the kept turn already has the last test output */
-  note: (showTests: boolean) => string;
+  /** the note for a checkpoint made now; `showTests` = false when the kept turn already has the last test output; `kept` = the files kept whole */
+  note: (showTests: boolean, kept: string[]) => string;
+  /** the current text of a file (path as the model named it), or null; absent = no kept files */
+  fileText?: (path: string) => string | null;
+  /** a file longer than this many lines is not kept (default 300) */
+  maxFileLines?: number;
+  /** one key per file for the names the model used (a.py, /w/a.py); default the name itself */
+  pathKey?: (path: string) => string;
+}
+
+/** the back-off never takes the milestone gap above this many times checkpointGap */
+export const BACKOFF_MAX = 4;
+
+export interface CheckpointOpts {
+  /** kept files: share of the usable prompt (0 = off) */
+  keepFiles?: number;
+  /** milestone gap back-off */
+  backoff?: boolean;
+  /** a steady milestone on the tree of the last checkpoint is skipped */
+  skipSame?: boolean;
 }
 
 interface Active {
@@ -242,10 +319,17 @@ interface Active {
   note: string;
   anchor: string;
   stale: Set<string>;
+  keep: Msg[];
 }
 
 export class Checkpointer {
-  private pending: { kind: MilestoneKind; callId: string } | null = null;
+  private pending: { kind: MilestoneKind; callId: string; tree?: string } | null = null;
+  /** the tree hash of the run the last checkpoint was made at */
+  private ckTree: string | null = null;
+  /** steady milestones skipped as the same tree as the last checkpoint (this request) */
+  skipped = 0;
+  /** set when the last `tests` skipped its milestone (same tree) */
+  lastSkipped = false;
   private active: Active | null = null;
   private since = Number.POSITIVE_INFINITY;
   /** checkpoints made (this request) */
@@ -254,11 +338,20 @@ export class Checkpointer {
   last: CheckpointInfo | null = null;
   private at: number;
   private minSave: number;
-  private gap: number;
-  constructor(at: number, minSave: number, gap: number) {
+  private baseGap: number;
+  /** the milestone gap in force: baseGap, doubled by the back-off */
+  gap: number;
+  private keepFiles: number;
+  private backoff: boolean;
+  private skipSame: boolean;
+  constructor(at: number, minSave: number, gap: number, opts: CheckpointOpts = {}) {
     this.at = at;
     this.minSave = minSave;
+    this.baseGap = gap;
     this.gap = gap;
+    this.keepFiles = opts.keepFiles ?? 0;
+    this.backoff = opts.backoff ?? false;
+    this.skipSame = opts.skipSame ?? false;
   }
 
   reset(): void {
@@ -267,11 +360,38 @@ export class Checkpointer {
     this.since = Number.POSITIVE_INFINITY;
     this.count = 0;
     this.last = null;
+    this.gap = this.baseGap;
+    this.ckTree = null;
+    this.skipped = 0;
+    this.lastSkipped = false;
+  }
+
+  /** Back-off: the gap after a milestone checkpoint made `since` calls after the last one. */
+  static nextGap(gap: number, base: number, since: number): number {
+    return since < 2 * gap ? Math.min(2 * gap, BACKOFF_MAX * base) : base;
+  }
+
+  /** The edited files to keep after the note: most recently edited first, each whole, within `budget` tokens. */
+  private keptFiles(messages: Msg[], req: number, cut: number, o: CheckpointCtx, budget: number): { path: string; text: string }[] {
+    if (!(this.keepFiles > 0) || !o.fileText || budget <= 0) return [];
+    const out: { path: string; text: string }[] = [];
+    let used = 0;
+    for (const path of editedBefore(messages, Math.max(0, req), cut, o.pathKey)) {
+      const text = o.fileText(path);
+      if (text === null || !text.trim() || text.split("\n").length > (o.maxFileLines ?? 300)) continue;
+      const cost = approxTokens(text.length + path.length + 40);
+      if (used + cost > budget) continue;
+      used += cost;
+      out.push({ path, text });
+    }
+    return out;
   }
 
   /** A run_tests result: its milestone, or null (then a pending milestone is dropped: the state moved on). */
-  tests(kind: MilestoneKind | null, callId: string): void {
-    this.pending = kind ? { kind, callId } : null;
+  tests(kind: MilestoneKind | null, callId: string, tree?: string): void {
+    this.lastSkipped = this.skipSame && kind === "steady" && tree !== undefined && tree === this.ckTree;
+    if (this.lastSkipped) this.skipped++;
+    this.pending = kind && !this.lastSkipped ? { kind, callId, ...(tree !== undefined ? { tree } : {}) } : null;
   }
 
   get hasPending(): boolean {
@@ -282,7 +402,7 @@ export class Checkpointer {
     const head = headEnd(messages, req);
     const cut = turnOf(messages, a.callId);
     if (cut < head) return undefined;
-    return cleaned(messages, head, cut, a.note, a.stale);
+    return cleaned(messages, head, cut, a.note, a.stale, a.keep);
   }
 
   /** What to send (a new list), or `undefined` when no checkpoint is in force. `messages` is not modified. */
@@ -318,18 +438,33 @@ export class Checkpointer {
       if (target === this.pending) this.pending = null;
       return out;
     }
-    const kept = messages.slice(cut);
-    const showTests = !kept.some((m) => m.role === "toolResult" && m.toolName === "run_tests");
-    const stale = new Set(kept.filter((m) => m.role === "assistant").map(asstId));
-    const next: Active = { callId: target.callId, note: o.note(showTests), anchor, stale };
-    const cand = cleaned(messages, head, cut, next.note, stale);
-    const saved = approxTokens(promptChars(view(cur)) - promptChars(view(cand)));
-    if (!pairingOk(cand) || saved <= 0 || saved < this.minSave * o.windowTokens) return out; // a pending milestone may still pass later
-    this.active = next;
+    const tail = messages.slice(cut);
+    const showTests = !tail.some((m) => m.role === "toolResult" && m.toolName === "run_tests");
+    const stale = new Set(tail.filter((m) => m.role === "assistant").map(asstId));
+    const usable = o.usableTokens > 0 ? o.usableTokens : o.windowTokens;
+    const files = this.keptFiles(messages, req, cut, o, this.keepFiles * usable);
+    // with the kept files first; without them when that list saves too little or would still be over the usable line
+    let made: { next: Active; cand: Msg[]; saved: number; files: typeof files } | null = null;
+    for (const fs of files.length ? [files, []] : [files]) {
+      const keep = keptTurn(fs, this.count + 1, messages[cut]);
+      const next: Active = { callId: target.callId, note: o.note(showTests, fs.map((f) => f.path)), anchor, stale, keep };
+      const cand = cleaned(messages, head, cut, next.note, stale, keep);
+      const saved = approxTokens(promptChars(view(cur)) - promptChars(view(cand)));
+      const over = o.usableTokens > 0 && before - saved > o.usableTokens;
+      // the kept text is what the model would read again at once: it does not count against checkpointMinSave
+      const worth = saved + approxTokens(promptChars(keep));
+      if (!pairingOk(cand) || saved <= 0 || worth < this.minSave * o.windowTokens || (fs.length && over)) continue;
+      made = { next, cand, saved, files: fs };
+      break;
+    }
+    if (!made) return out; // a pending milestone may still pass later
+    if (target.kind !== "pressure" && this.backoff) this.gap = Checkpointer.nextGap(this.gap, this.baseGap, this.since);
+    if (target.kind !== "pressure") this.ckTree = this.pending?.tree ?? null;
+    this.active = made.next;
     this.pending = null;
     this.since = 0;
     this.count++;
-    this.last = { kind: target.kind, tokensBefore: before, tokensAfter: Math.max(0, before - saved), removed: cut - head, noteChars: next.note.length };
-    return cand;
+    this.last = { kind: target.kind, tokensBefore: before, tokensAfter: Math.max(0, before - made.saved), removed: cut - head, noteChars: made.next.note.length, kept: made.files, gap: this.gap };
+    return made.cand;
   }
 }

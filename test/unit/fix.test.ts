@@ -282,6 +282,7 @@ function fakeTests(texts: string[]) {
 const FAIL10 = "FAIL 10 failed in 0.1s\n";
 const FAIL4 = "FAIL 4 failed, 6 passed in 0.1s\n";
 
+// rung 3's starting tree after rungs 1-2; the second quick try (rung 1b) is off here and tested in secondtry.test.ts
 async function allFail(texts: string[], ladder: Record<string, unknown> = {}) {
   const f = fixture("r2-03-allfail");
   const { cwd, env } = setup(f);
@@ -294,7 +295,7 @@ async function allFail(texts: string[], ladder: Record<string, unknown> = {}) {
     return { turns: 1 };
   };
   const lines: string[] = [];
-  const r = await runFix(parseFixArgs(`--test ${f.test} Fix the invoice.`), { cwd, config: cfg({ ladder: { rung2: true, ...ladder } }), chat: scripted(f.replies).chat, pi, report: (l) => lines.push(l), env, runTests: fakeTests(texts) as never });
+  const r = await runFix(parseFixArgs(`--test ${f.test} Fix the invoice.`), { cwd, config: cfg({ ladder: { rung2: true, secondTry: false, ...ladder } }), chat: scripted(f.replies).chat, pi, report: (l) => lines.push(l), env, runTests: fakeTests(texts) as never });
   return { cwd, env, before, atHandoff, seen: seen as PiHandoff | null, r, lines };
 }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tmpDir } from "./tmpdir.ts";
@@ -360,7 +360,8 @@ test("the extension: the system prompt has no Pi docs block, carries the terse l
 
 test("the extension: run_tests keeps the best tree; a worse run says so and restore_best puts the better files back; a whole-file write over a file gets a nudge; a cut read ends with an explicit line", async () => {
   const cwd = repo();
-  writeFileSync(join(cwd, "cfg.json"), JSON.stringify({ test: { command: "cat out.txt; false" } }));
+  // undoWorse off: the model restores by itself here (the auto-undo default has its own test below)
+  writeFileSync(join(cwd, "cfg.json"), JSON.stringify({ test: { command: "cat out.txt; false" }, limits: { undoWorse: false } }));
   writeFileSync(join(cwd, "bowling.py"), "v1\n");
   writeFileSync(join(cwd, "out.txt"), "FAILED t::a - x\n7 failed, 24 passed in 0.1s\n");
   const { handlers, tools, active } = await load({ TINYCODE_CONFIG: join(cwd, "cfg.json"), TINYCODE_LOG: join(cwd, "calls.jsonl") });
@@ -395,6 +396,40 @@ test("the extension: run_tests keeps the best tree; a worse run says so and rest
   assert.equal((await exec("restore_best")).content[0]!.text, "No best tree yet.");
 });
 
+test("the extension, undoWorse: a worse run puts the best tree back at once (undoWorseFrom 1), the test file untouched; the same break a third time turns it off", async () => {
+  const cwd = repo();
+  // stuck rule off here: with it on, the third run without progress is its stop (src/besttree.ts, unit-tested);
+  // undoWorseFrom 1 (at once): the default 2 lets a first break through (unit-tested in besttree.test.ts)
+  writeFileSync(join(cwd, "cfg.json"), JSON.stringify({ test: { command: "cat out.txt; false" }, limits: { stuckTestRuns: 0, undoWorseFrom: 1 } }));
+  writeFileSync(join(cwd, "bowling.py"), "v1\n");
+  writeFileSync(join(cwd, "bowling_test.py"), "t1\n");
+  writeFileSync(join(cwd, "out.txt"), "FAILED t::a - x\n7 failed, 24 passed in 0.1s\n");
+  // the log (and the undo dir beside it) outside the tree, as in a real run: a restore removes files created since
+  const { handlers, tools } = await load({ TINYCODE_CONFIG: join(cwd, "cfg.json"), TINYCODE_LOG: join(tmpDir("tc-undo-log-"), "calls.jsonl") });
+  const ctx = { cwd, hasUI: false };
+  await (handlers.get("before_agent_start") ?? [])[0]!({ prompt: "what is a tuple?", systemPrompt: "B" }, ctx);
+  const exec = (name: string) => (tools.get(name) as unknown as { execute: Exec }).execute("id", {}, undefined, undefined, ctx);
+  await exec("run_tests"); // the best: 24/31, snapshot of v1 and t1
+  const breakIt = async () => {
+    writeFileSync(join(cwd, "bowling.py"), "v2 broken\n");
+    writeFileSync(join(cwd, "bowling_test.py"), "t2 (the model's)\n");
+    writeFileSync(join(cwd, "helper.py"), "new\n");
+    writeFileSync(join(cwd, "test_extra.py"), "new test\n");
+    writeFileSync(join(cwd, "out.txt"), "FAILED t::a - x\nFAILED t::b - y\n28 failed, 3 passed in 0.1s\n");
+    return (await exec("run_tests")).content[0]!.text;
+  };
+  const first = await breakIt();
+  assert.match(first, /\nEdit made 21 more fail: best tree back \(24\/31\)\. Try another way\.$/);
+  assert.equal(readFileSync(join(cwd, "bowling.py"), "utf8"), "v1\n", "the source is back");
+  assert.equal(existsSync(join(cwd, "helper.py")), false, "a source file created since is removed");
+  assert.equal(readFileSync(join(cwd, "bowling_test.py"), "utf8"), "t2 (the model's)\n", "a test file is never restored");
+  assert.equal(existsSync(join(cwd, "test_extra.py")), true, "nor removed");
+  assert.match(await breakIt(), /best tree back/);
+  assert.match(await breakIt(), /\nSame break 3 times: best tree back \(24\/31\)\. No more auto-restore until new best\. Change approach\.$/);
+  assert.match(await breakIt(), /\nWorse than best \(24\/31 at test run 1\)\. Restore: call restore_best\.$/, "off until a new best");
+  assert.equal(readFileSync(join(cwd, "bowling.py"), "utf8"), "v2 broken\n");
+});
+
 test("the extension: heartbeats and stuck lines never reach the model's context; the hint stays", async () => {
   const cwd = repo();
   const { handlers } = await load({ TINYCODE_CONFIG: join(cwd, "none.json"), TINYCODE_LOG: join(cwd, "calls.jsonl") });
@@ -406,4 +441,22 @@ test("the extension: heartbeats and stuck lines never reach the model's context;
     { role: "custom", customType: "tinycode-hint", content: "tinyCode hint: use `fix`.", display: false, timestamp: 3 },
   ] }, ctx) as { messages: { customType?: string; role: string }[] };
   assert.deepEqual(out.messages.map((m) => m.customType ?? m.role), ["user", "tinycode-hint"]);
+});
+
+test("the extension, undoWorse default (undoWorseFrom 2): a first break gets the old line and is left for the model; the same break again is undone", async () => {
+  const cwd = repo();
+  writeFileSync(join(cwd, "cfg.json"), JSON.stringify({ test: { command: "cat out.txt; false" }, limits: { stuckTestRuns: 0 } }));
+  writeFileSync(join(cwd, "bowling.py"), "v1\n");
+  writeFileSync(join(cwd, "out.txt"), "FAILED t::a - x\n7 failed, 24 passed in 0.1s\n");
+  const { handlers, tools } = await load({ TINYCODE_CONFIG: join(cwd, "cfg.json"), TINYCODE_LOG: join(tmpDir("tc-undo2-log-"), "calls.jsonl") });
+  const ctx = { cwd, hasUI: false };
+  await (handlers.get("before_agent_start") ?? [])[0]!({ prompt: "what is a tuple?", systemPrompt: "B" }, ctx);
+  const exec = (name: string) => (tools.get(name) as unknown as { execute: Exec }).execute("id", {}, undefined, undefined, ctx);
+  await exec("run_tests");
+  writeFileSync(join(cwd, "bowling.py"), "v2 broken\n");
+  writeFileSync(join(cwd, "out.txt"), "FAILED t::b - y\n28 failed, 3 passed in 0.1s\n");
+  assert.match((await exec("run_tests")).content[0]!.text, /\nWorse than best \(24\/31 at test run 1\)\. Restore: call restore_best\.$/);
+  assert.equal(readFileSync(join(cwd, "bowling.py"), "utf8"), "v2 broken\n", "a first break may be fixed forward");
+  assert.match((await exec("run_tests")).content[0]!.text, /\nEdit made 21 more fail: best tree back \(24\/31\)\. Try another way\.$/);
+  assert.equal(readFileSync(join(cwd, "bowling.py"), "utf8"), "v1\n");
 });

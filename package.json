@@ -1,6 +1,6 @@
 {
   "name": "tinycode",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A Pi extension that keeps the context small, so local models finish coding tasks in a 16k window where plain Pi runs out of room",
   "license": "Apache-2.0",
   "repository": {

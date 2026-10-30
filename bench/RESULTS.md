@@ -1,48 +1,104 @@
-# tinyCode at a 16k context window: Pi alone vs Pi + tinyCode
+# Pi alone vs Pi + tinyCode on two tested setups
 
-| Task | Pi alone | Pi + tinyCode |
-|---|---|---|
-| connect | ✗ context full (4 failed, 6 passed) | ✗ time cap (1 failed, 9 passed) · ✓ 38 s |
-| bowling | ✗ context full (6 failed, 25 passed) | ✓ 557 s |
-| dot-dsl | ✓ 38 s | ✓ 236 s |
-| paasio | ✗ reply cut (window full) (1 failed, 24 passed) | ✓ 347 s |
-| sgf-parsing | ✗ context full (17 failed, 6 passed) | ✓ 539 s |
-| **solved** | **1 of 5 runs** | **5 of 6 runs** |
+| Card | Model (why) | Window | Pi alone | Pi + tinyCode |
+|---|---|---|---|---|
+| 16 GB (Tesla T4) | gpt-oss-20b (best coder that fits) | 16k | 3 of 9 | **6 of 9** |
+| 16 GB (Tesla T4) | Qwen3.6-35B-A3B (popular reference) | 16k | 4 of 14 | **10 of 13** |
+| 8 GB (Quadro P4000) | Nemotron-Nano-9B-v2 (best coder that fits) | 16k | 0 of 2 | **0 of 1** |
 
-At a 32k window, the same five tasks: Pi alone passed 8 of 8 runs, Pi + tinyCode 5 of 6 (earlier tinyCode settings).
+Each mark is one run, in order: ✓ pass with its time in seconds, ✗ fail, · not run yet (three runs per side):
+
+| Task | What it asks (tests) | gpt-oss: Pi / +tinyCode | Qwen3.6: Pi / +tinyCode | Nemotron: Pi / +tinyCode |
+|---|---|---|---|---|
+| [connect](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/connect) | decide who won a game of Hex: an unbroken path of stones across a board of hexagons (10) | ✗ ✗ ✓26 / ✓72 ✓30 ✓28 | ✗ ✗ ✗ / ✓30 ✓76 ✓260 | ✗ · · / ✗ · · |
+| [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | score ten-pin bowling: strikes, spares, the tenth frame, and illegal rolls (31) | ✗ ✗ · / ✗ ✗ · | ✗ ✗ ✗ / ✗ ✗ ✓327 | ✗ · · / · · · |
+| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | a small language for building graphs (nodes, edges, attributes) that rejects malformed input (12) | ✓64 ✓52 · / ✓44 ✓50 · | ✓76 ✗ ✗ / ✓198 ✓36 ✓70 | · · · / · · · |
+| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | wrap files and sockets so they count bytes read, written and calls made (25) | ✗ ✗ · / ✗ ✓152 · | ✓46 ✓64 ✓48 / ✓204 ✓298 ✓377 | · · · / · · · |
+| [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | parse SGF, the text format for recording games of Go, into a tree (23) | · · · / · · · | ✗ ✗ · / ✗ · · | · · · / · · · |
+| **Total** | **solved, median time of the passes** | **3 of 9** (52 s) / **6 of 9** (47 s) | **4 of 14** (56 s) / **10 of 13** (201 s) | **0 of 2** (–) / **0 of 1** (–) |
+
+Runs that stopped to ask a question instead of acting (no one answers in these runs, so they count as fails): Nemotron-Nano-9B-v2: Pi alone 2 of 2, Pi + tinyCode 0 of 1.
 
 ## Method
 
-- **Question:** at a context window a local GPU can afford, does Pi still finish the task, and does tinyCode change that?
-- **Model and server:** Qwen3.6-35B-A3B (UD-IQ3_XXS) on one 16 GB NVIDIA T4, llama.cpp `llama-server`, **16,384-token
-  window** for the server and both sides, f16 KV cache, thinking off, temperature 0.3 with a fixed seed per run.
+- **Question:** on a context window a local GPU can afford, does Pi still finish the task, and does tinyCode change that?
+- **Setups:** two cards, each with a model that fits it and a **16,384-token window** for the server and both sides;
+  llama.cpp `llama-server`, flash attention, thinking off, temperature 0.3 with a fixed seed per run.
 - **Tasks:** five Python exercises from [Aider's polyglot benchmark](https://github.com/Aider-AI/polyglot-benchmark)
-  (Exercism, MIT). Chosen by one rule, before these runs: the exercises where Pi alone's largest prompt went past 14k
-  tokens when it had a 32k window (connect, bowling, dot-dsl, paasio from our 9-task set; sgf-parsing from the next six
-  by reference-solution size).
+  (Exercism, MIT), chosen by one rule before these runs: the exercises where plain Pi's largest prompt went past 14k
+  tokens when it had a 32k window.
 - **Prompt (both sides, identical):** the exercise's instructions, then "Edit <solution file> so that the tests in <test
   file> pass. Don't change the test file." **Pass** = the test file passes afterwards, restored from the original first.
-- **Pi alone:** Pi 1.4.0 with no extensions. **Pi + tinyCode:** the same Pi with tinyCode v1.0 defaults.
-- **Each run:** interactive Pi in its own terminal, a fresh state directory, a time cap of 10 minutes (Pi alone's first
-  runs used 8 minutes; none of them came within 2 minutes of it).
+- **Pi alone:** Pi 1.4.0 with no extensions. **Pi + tinyCode:** the same Pi with tinyCode at its defaults.
+- **Each run:** interactive Pi in its own terminal, a fresh state directory, a 10-minute cap. A run stopped by the cap
+  is graded on its last state, so a tinyCode run that had reached a better state earlier still counts as a fail.
 - **Measured the same way for both:** a logging proxy between Pi and the server records every call. *Peak context* = the
-  largest prompt of a run. *Generated tokens* = all tokens the model wrote. *Context full* = Pi had no room left for a
-  reply: it asks for at most the window minus its own estimate of the prompt minus 4,096 tokens, so a run can end
-  "full" while the measured prompt is smaller (sgf-parsing, Pi alone).
-- **Repetitions:** see the Run column; more are being added. Five tasks is a small set: read it as direction, not proof.
+  largest prompt of a run. *Context full* = Pi had no room left for a reply: it asks for at most the window minus its own
+  estimate of the prompt minus 4,096 tokens.
+- **Repetitions:** three runs per task and side. llama-server is not fully deterministic even with a seed, so runs of
+  the same cell can differ. Five tasks is a small set: read it as direction, not proof.
 
 ## Every run
 
+### 16 GB, gpt-oss-20b (MXFP4, 12.1 GB, 16k window, 16-bit cache)
+
 | Task | Side | Run | Result | Tests | Time | Calls | Peak context | Generated tokens |
 |---|---|---|---|---|---|---|---|---|
-| connect | Pi alone | 1 | context full | 4 failed, 6 passed | 144 s | 13 | 13.2k | 6544 |
-| connect | Pi + tinyCode | 1 | time cap | 1 failed, 9 passed | 10.0 min | 71 | 10.1k | 23252 |
-| connect | Pi + tinyCode | 2 | pass | 10 passed | 38 s | 3 | 2.7k | 1372 |
-| bowling | Pi alone | 1 | context full | 6 failed, 25 passed | 48 s | 5 | 14.0k | 1685 |
-| bowling | Pi + tinyCode | 1 | pass | 31 passed | 557 s | 59 | 10.0k | 21378 |
-| dot-dsl | Pi alone | 1 | pass | 12 passed | 38 s | 7 | 6.3k | 1422 |
-| dot-dsl | Pi + tinyCode | 1 | pass | 12 passed | 236 s | 37 | 9.1k | 8583 |
-| paasio | Pi alone | 1 | reply cut (window full) | 1 failed, 24 passed | 50 s | 6 | 11.8k | 1733 |
-| paasio | Pi + tinyCode | 1 | pass | 25 passed | 347 s | 88 | 10.3k | 9556 |
+| connect | Pi alone | 1 | fail | 4 failed, 6 passed | 32 s | 5 | 3.6k | 1471 |
+| connect | Pi alone | 2 | fail | 4 failed, 6 passed | 28 s | 5 | 3.5k | 1170 |
+| connect | Pi alone | 3 | pass | 10 passed | 26 s | 6 | 3.6k | 1088 |
+| connect | Pi + tinyCode | 1 | pass | 10 passed | 72 s | 13 | 6.3k | 3078 |
+| connect | Pi + tinyCode | 2 | pass | 10 passed | 30 s | 8 | 3.1k | 1184 |
+| connect | Pi + tinyCode | 3 | pass | 10 passed | 28 s | 7 | 2.7k | 1110 |
+| bowling | Pi alone | 1 | fail | 10 failed, 21 passed | 42 s | 6 | 7.4k | 1843 |
+| bowling | Pi alone | 2 | fail | 31 failed | 12 s | 5 | 5.7k | 247 |
+| bowling | Pi + tinyCode | 1 | fail | 26 failed, 5 passed | 80 s | 8 | 5.7k | 3280 |
+| bowling | Pi + tinyCode | 2 | fail | 6 failed, 25 passed | 284 s | 18 | 8.3k | 12936 |
+| dot-dsl | Pi alone | 1 | pass | 12 passed | 64 s | 13 | 7.1k | 2860 |
+| dot-dsl | Pi alone | 2 | pass | 12 passed | 52 s | 8 | 5.7k | 2433 |
+| dot-dsl | Pi + tinyCode | 1 | pass | 12 passed | 44 s | 9 | 5.7k | 1664 |
+| dot-dsl | Pi + tinyCode | 2 | pass | 12 passed | 50 s | 11 | 5.6k | 1945 |
+| paasio | Pi alone | 1 | context full | 25 failed | 116 s | 10 | 12.0k | 5315 |
+| paasio | Pi alone | 2 | fail | 2 failed, 23 passed | 62 s | 8 | 9.0k | 2742 |
+| paasio | Pi + tinyCode | 1 | fail | 1 failed, 24 passed | 256 s | 33 | 9.3k | 10809 |
+| paasio | Pi + tinyCode | 2 | pass | 25 passed | 152 s | 21 | 8.7k | 6484 |
+
+### 16 GB, Qwen3.6-35B-A3B (UD-IQ3_XXS, 13.2 GB, 16k window, 16-bit cache)
+
+| Task | Side | Run | Result | Tests | Time | Calls | Peak context | Generated tokens |
+|---|---|---|---|---|---|---|---|---|
+| connect | Pi alone | 1 | context full | 2 failed, 8 passed | 170 s | 8 | 12.4k | 8008 |
+| connect | Pi alone | 2 | context full | 3 failed, 7 passed | 154 s | 12 | 12.2k | 7023 |
+| connect | Pi alone | 3 | context full | 1 failed, 9 passed | 160 s | 13 | 12.5k | 7327 |
+| connect | Pi + tinyCode | 1 | pass | 10 passed | 30 s | 3 | 2.7k | 758 |
+| connect | Pi + tinyCode | 2 | pass | 10 passed | 76 s | 7 | 5.1k | 3067 |
+| connect | Pi + tinyCode | 3 | pass | 10 passed | 260 s | 18 | 9.1k | 11510 |
+| bowling | Pi alone | 1 | context full | 14 failed, 17 passed | 70 s | 6 | 11.2k | 2901 |
+| bowling | Pi alone | 2 | context full | 8 failed, 23 passed | 68 s | 5 | 13.3k | 2687 |
+| bowling | Pi alone | 3 | context full | 28 failed, 3 passed | 54 s | 5 | 9.8k | 2030 |
+| bowling | Pi + tinyCode | 1 | time cap | 28 failed, 3 passed | 10.0 min | 50 | 9.7k | 23587 |
+| bowling | Pi + tinyCode | 2 | time cap | 15 failed, 16 passed | 10.0 min | 58 | 9.9k | 22791 |
+| bowling | Pi + tinyCode | 3 | pass | 31 passed | 327 s | 19 | 10.3k | 13795 |
+| dot-dsl | Pi alone | 1 | pass | 12 passed | 76 s | 11 | 10.4k | 3092 |
+| dot-dsl | Pi alone | 2 | context full | 1 failed, 11 passed | 74 s | 11 | 12.7k | 2847 |
+| dot-dsl | Pi alone | 3 | context full | 1 failed, 11 passed | 82 s | 9 | 12.3k | 3346 |
+| dot-dsl | Pi + tinyCode | 1 | pass | 12 passed | 198 s | 24 | 8.8k | 7698 |
+| dot-dsl | Pi + tinyCode | 2 | pass | 12 passed | 36 s | 5 | 5.3k | 1118 |
+| dot-dsl | Pi + tinyCode | 3 | pass | 12 passed | 70 s | 12 | 6.2k | 2329 |
+| paasio | Pi alone | 1 | pass | 25 passed | 46 s | 7 | 11.7k | 1522 |
+| paasio | Pi alone | 2 | pass | 25 passed | 64 s | 8 | 12.3k | 2409 |
+| paasio | Pi alone | 3 | pass | 25 passed | 48 s | 6 | 10.7k | 1677 |
+| paasio | Pi + tinyCode | 1 | pass | 25 passed | 204 s | 38 | 10.1k | 6697 |
+| paasio | Pi + tinyCode | 2 | pass | 25 passed | 298 s | 62 | 9.8k | 9605 |
+| paasio | Pi + tinyCode | 3 | pass | 25 passed | 377 s | 63 | 10.2k | 12772 |
 | sgf-parsing | Pi alone | 1 | context full | 17 failed, 6 passed | 36 s | 3 | 6.1k | 1435 |
-| sgf-parsing | Pi + tinyCode | 1 | pass | 23 passed | 539 s | 60 | 10.7k | 20649 |
+| sgf-parsing | Pi alone | 2 | context full | 5 failed, 18 passed | 78 s | 7 | 12.8k | 3183 |
+| sgf-parsing | Pi + tinyCode | 1 | time cap | 5 failed, 18 passed | 10.0 min | 74 | 10.3k | 22854 |
+
+### 8 GB, Nemotron-Nano-9B-v2 (Q4_K_M, 6.5 GB, 16k window, 8-bit cache)
+
+| Task | Side | Run | Result | Tests | Time | Calls | Peak context | Generated tokens |
+|---|---|---|---|---|---|---|---|---|
+| connect | Pi alone | 1 | fail | 10 failed | 10 s | 1 | 1.8k | 51 |
+| connect | Pi + tinyCode | 1 | time cap | 5 failed, 5 passed | 10.0 min | 35 | 9.8k | 11107 |
+| bowling | Pi alone | 1 | fail | 9 failed, 22 passed | 62 s | 2 | 3.3k | 1105 |

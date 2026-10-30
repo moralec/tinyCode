@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { tmpDir } from "./tmpdir.ts";
 import { BestTree, LOOP_SLOT, rewriteNudge } from "../../src/besttree.ts";
-import { restoreSnapshot, takeSnapshot } from "../../src/workflows/fix.ts";
+import { isTestPath, restoreSnapshot, takeSnapshot, treeHash } from "../../src/workflows/fix.ts";
 import { dropDisplayOnly } from "../../src/orchestrate.ts";
 import { CUSTOM_BEAT } from "../../src/progress.ts";
 
@@ -147,4 +147,117 @@ test("end restore: a request ending below its best gets the best tree back, once
   assert.equal(restored, 1);
   assert.equal(t.endRestore(back), null); // once
   assert.equal(new BestTree().endRestore(back), null); // no best
+});
+
+// ---------------------------------------------------------------- undo at once (limits.undoWorse)
+
+test("undo: a worse run puts the best back at once with one line; equal and better runs never restore; off = the old line", () => {
+  const t = new BestTree(0, 0, true);
+  let undone = 0;
+  const snap = () => {};
+  const undo = () => void undone++;
+  const o = (sig?: string) => ({ undo, sig });
+  assert.equal(t.observe(c(11, 1), snap, undefined, o()), null, "first best");
+  assert.equal(t.observe(c(11, 1), snap, undefined, o()), null, "equal: kept, may hold work the tests do not see");
+  assert.equal(undone, 0);
+  assert.equal(t.observe(c(9, 3), snap, undefined, o("9/3|a|b|c")), "Edit made 2 more fail: best tree back (11/12). Try another way.");
+  assert.deepEqual([undone, t.undos, t.verdict, t.lastCounts], [1, 1, "worse", c(11, 1)], "the tree is the best again: the note must not say 'worse'");
+  assert.equal(t.observe(c(0, 1), snap, undefined, o("0/1|import")), "Edit made 11 more fail: best tree back (11/12). Try another way.", "a tree that no longer imports");
+  assert.equal(t.observe(c(11, 2), snap, undefined, o("11/2|a|z")), "Edit made 1 more fail: best tree back (11/12). Try another way.", "same pass count, one more fail");
+  assert.equal(t.observe(c(12, 0), snap, undefined, o()), null, "better: a new best, no restore");
+  assert.equal(undone, 3);
+  const off = new BestTree(0, 0, false);
+  off.observe(c(11, 1), snap, undefined, o());
+  assert.equal(off.observe(c(9, 3), snap, undefined, o()), "Worse than best (11/12 at test run 1). Restore: call restore_best.");
+  assert.equal(undone, 3, "undoWorse off: nothing restored");
+  const noSnap = new BestTree(0, 0, true);
+  noSnap.observe(c(11, 1), snap);
+  assert.match(noSnap.observe(c(9, 3), snap, undefined, { undo: () => null }) ?? "", /^Worse than best/, "no snapshot: the old line, no claim");
+});
+
+test("undo: the same break a third time says so once and stops auto-restore until a new best; another break still restores", () => {
+  const t = new BestTree(0, 0, true);
+  let undone = 0;
+  const snap = () => {};
+  const o = (sig: string) => ({ undo: () => void undone++, sig });
+  t.observe(c(11, 1), snap, undefined, o("best"));
+  assert.match(t.observe(c(9, 3), snap, undefined, o("A")) ?? "", /^Edit made 2 more fail/);
+  assert.match(t.observe(c(10, 2), snap, undefined, o("B")) ?? "", /^Edit made 1 more fail/, "another break");
+  assert.match(t.observe(c(9, 3), snap, undefined, o("A")) ?? "", /^Edit made 2 more fail/);
+  assert.equal(t.observe(c(9, 3), snap, undefined, o("A")), "Same break 3 times: best tree back (11/12). No more auto-restore until new best. Change approach.");
+  assert.equal(undone, 4);
+  assert.equal(t.observe(c(9, 3), snap, undefined, o("A")), "Worse than best (11/12 at test run 1). Restore: call restore_best.", "off: the model decides");
+  assert.equal(t.observe(c(10, 2), snap, undefined, o("B")), "Worse than best (11/12 at test run 1). Restore: call restore_best.", "off for every break");
+  assert.equal(undone, 4);
+  t.observe(c(12, 1), snap, undefined, o("best2")); // a new best re-arms it
+  assert.match(t.observe(c(9, 4), snap, undefined, o("A")) ?? "", /^Edit made 3 more fail: best tree back \(12\/13\)/);
+  t.reset();
+  assert.equal(t.undos, 0);
+});
+
+test("undo with the stuck rule: the stuckRuns-th run without progress is the stuck stop (its own restore), as before", () => {
+  const t = new BestTree(3, 0, true);
+  let undone = 0;
+  let restored = 0;
+  const snap = () => {};
+  const o = { undo: () => void undone++, sig: "A" };
+  t.observe(c(24, 7), snap, () => void restored++, o);
+  assert.match(t.observe(c(3, 28), snap, () => void restored++, o) ?? "", /^Edit made 21 more fail/);
+  assert.equal(t.observe(c(24, 7), snap, () => void restored++, o), null);
+  assert.equal(t.observe(c(3, 28), snap, () => void restored++, o), "No progress 3 test runs. Best restored (24/31). Stop: report what still fails.");
+  assert.deepEqual([undone, restored, t.lastCounts], [1, 1, c(24, 7)]);
+});
+
+test("undo with real files: the source comes back, test files are neither restored nor removed", () => {
+  const cwd = tmpDir("tc-undo-");
+  const env = { TINYCODE_LOG: join(tmpDir("tc-undo-log-"), "c.jsonl") };
+  writeFileSync(join(cwd, "dot_dsl.py"), "v1\n");
+  writeFileSync(join(cwd, "dot_dsl_test.py"), "t1\n");
+  const t = new BestTree(0, 0, true);
+  t.observe(c(11, 1), () => void takeSnapshot(cwd, env, LOOP_SLOT));
+  writeFileSync(join(cwd, "dot_dsl.py"), "v2\n");
+  writeFileSync(join(cwd, "dot_dsl_test.py"), "t2\n");
+  writeFileSync(join(cwd, "extra.py"), "new\n");
+  writeFileSync(join(cwd, "test_new.py"), "new test\n");
+  const line = t.observe(c(9, 3), () => {}, undefined, { undo: () => restoreSnapshot(cwd, env, LOOP_SLOT, isTestPath) });
+  assert.match(line ?? "", /best tree back \(11\/12\)/);
+  assert.equal(readFileSync(join(cwd, "dot_dsl.py"), "utf8"), "v1\n");
+  assert.equal(existsSync(join(cwd, "extra.py")), false);
+  assert.equal(readFileSync(join(cwd, "dot_dsl_test.py"), "utf8"), "t2\n", "the test file is never touched");
+  assert.equal(existsSync(join(cwd, "test_new.py")), true);
+  for (const [p, want] of [["a_test.py", true], ["test_a.py", true], ["tests/x.py", true], ["a.test.ts", true], ["conftest.py", true], ["a.py", false], ["latest.py", false], ["contest.py", false]] as const) assert.equal(isTestPath(p), want, p);
+});
+
+test("undo from the 2nd time (limits.undoWorseFrom 2): a first break gets the old line and may be fixed forward; the same break again is undone", () => {
+  const t = new BestTree(0, 0, true, 2);
+  let undone = 0;
+  const snap = () => {};
+  const o = (sig: string) => ({ undo: () => void undone++, sig });
+  t.observe(c(28, 3), snap, undefined, o("best"));
+  assert.match(t.observe(c(3, 28), snap, undefined, o("A")) ?? "", /^Worse than best/, "bowling r2: 28/31 -> 3/31 ...");
+  assert.match(t.observe(c(25, 6), snap, undefined, o("B")) ?? "", /^Worse than best/, "... -> 25/31 ...");
+  assert.equal(t.observe(c(31, 0), snap, undefined, o("green")), null, "... -> 31/31: fixed forward, nothing undone");
+  assert.equal(undone, 0);
+  const r = new BestTree(0, 0, true, 2);
+  r.observe(c(11, 1), snap, undefined, o("best"));
+  assert.match(r.observe(c(9, 3), snap, undefined, o("A")) ?? "", /^Worse than best/);
+  assert.match(r.observe(c(9, 3), snap, undefined, o("A")) ?? "", /^Edit made 2 more fail: best tree back/, "the same break again: undone");
+  assert.match(r.observe(c(9, 3), snap, undefined, o("A")) ?? "", /^Same break 3 times/);
+  assert.equal(undone, 2);
+});
+
+test("treeHash: the same for the same non-test files; a source change or a new file changes it; a test file does not", () => {
+  const cwd = tmpDir("tc-hash-");
+  writeFileSync(join(cwd, "dot_dsl.py"), "v1\n");
+  writeFileSync(join(cwd, "dot_dsl_test.py"), "t1\n");
+  const h1 = treeHash(cwd);
+  assert.equal(treeHash(cwd), h1);
+  writeFileSync(join(cwd, "dot_dsl_test.py"), "t2\n");
+  assert.equal(treeHash(cwd), h1, "test files are not part of the tree");
+  writeFileSync(join(cwd, "dot_dsl.py"), "v2\n");
+  assert.notEqual(treeHash(cwd), h1);
+  writeFileSync(join(cwd, "dot_dsl.py"), "v1\n");
+  assert.equal(treeHash(cwd), h1, "back to the same content: the same hash");
+  writeFileSync(join(cwd, "helper.py"), "x\n");
+  assert.notEqual(treeHash(cwd), h1);
 });

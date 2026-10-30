@@ -14,7 +14,7 @@ matching [milestone](https://github.com/moralec/tinyCode/milestones).
 - [x] The best test result is kept; a run never ends below it
 - [x] Takes over fixing failing tests (one quick try, then Pi's loop) and writing tests; everything else is plain Pi
 - [x] Routing by code only, no extra model call
-- [ ] Three runs per task at 16k (one so far)
+- [ ] Three runs per task at 16k on each tested setup (in progress)
 
 ## v1.1 — smaller cards
 
@@ -24,6 +24,8 @@ matching [milestone](https://github.com/moralec/tinyCode/milestones).
 - [ ] Read less: one function instead of a whole file
 - [ ] Test output cut to the failing assertion
 - [ ] Pi's loop starts with what the quick try already read, instead of reading it again
+- [ ] A second quick try with a fresh sample before Pi's loop (hit-or-miss tasks like connect)
+- [ ] The Adaptive Ladder learns each model's window habits: talkative replies, reasoning in code comments, reply length (#11)
 - [ ] The installer suggests a context window for your card
 
 ## v1.2 — bugs described in words

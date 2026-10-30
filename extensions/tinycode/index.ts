@@ -1,14 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatAdaptive, readRuns } from "../../src/adaptive.ts";
-import { loadConfig, configPath, type Config, type Lane } from "../../src/config.ts";
+import { DEFAULT_CONTEXT_WINDOW, loadConfig, configPath, type Config, type Lane } from "../../src/config.ts";
 import { findAnswer, registerBranchTools, registerTodoTool } from "../../src/branch.ts";
 import { chat, SESSION } from "../../src/llm.ts";
-import { createLimits, readCutMarker, sizeTokens, toolCallVerdict, usableTokens, withTail } from "../../src/limits.ts";
+import { createLimits, readCutMarker, sizeTokens, toolCallVerdict, usableTokens, windowHash, withTail } from "../../src/limits.ts";
 import { buildNote, Checkpointer, milestoneOf, requestStart, requestText, touchedFiles } from "../../src/checkpoint.ts";
 import { parseCounts } from "../../src/testrun.ts";
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { formatStats, logCall, logToolsFirst, readCalls } from "../../src/log.ts";
 import { makeIndexCache, route, type Routed } from "../../src/router.ts";
 import { agreement, asToolTurn, choose, DoneGuard, dropDisplayOnly, formatOrchestration, logDecision, logDirect, rateFor, readDecisions, readLog, resultMessage, runDirect, scopeAfter, scopeBefore, targetOf, type DirectCall } from "../../src/orchestrate.ts";
@@ -34,9 +33,7 @@ import { EDIT_PHASES, parseEditArgs, runEdit } from "../../src/workflows/edit.ts
 import { PLAN_PHASES, parsePlanArgs, runPlan } from "../../src/workflows/plan.ts";
 import { formatResearch, parseResearchArgs, RESEARCH_PHASES, runResearch } from "../../src/workflows/research.ts";
 import { parseReviewArgs, REVIEW_PHASES, runReview } from "../../src/workflows/review.ts";
-import { FIX_PHASES, handoverText, parseFixArgs, restoreSnapshot, runFix, takeSnapshot, undoFix, type PiHandoff } from "../../src/workflows/fix.ts";
-
-const DEFAULT_CONTEXT_WINDOW = 32768; // used when a lane sets no contextWindow
+import { FIX_PHASES, handoverText, isTestPath, parseFixArgs, restoreSnapshot, runFix, takeSnapshot, treeHash, undoFix, type PiHandoff } from "../../src/workflows/fix.ts";
 
 export default function (pi: ExtensionAPI) {
   let cfg: Config;
@@ -75,11 +72,13 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  const tm = toolManager(pi, cfg.limits.stuckTestRuns, cfg.limits.autoContinue);
+  const tm = toolManager(pi, cfg.limits.stuckTestRuns, cfg.limits.autoContinue, cfg.limits.undoWorse, cfg.limits.undoWorseFrom);
   registerBranchTools(pi, cfg, {
     tree: tm.best,
     snapshot: (cwd) => void takeSnapshot(cwd, process.env, LOOP_SLOT),
     restore: (cwd) => restoreSnapshot(cwd, process.env, LOOP_SLOT),
+    // undo a worse run at once (limits.undoWorse): never a test file
+    undo: cfg.limits.undoWorse ? (cwd) => restoreSnapshot(cwd, process.env, LOOP_SLOT, isTestPath) : undefined,
     onFirstBest: () => tm.sync(),
   });
   const loop = wireLimits(pi, cfg, tm);
@@ -132,8 +131,8 @@ function registerDev(pi: ExtensionAPI): void {
  * once the request is in raw-tool work (the diet), plus `restore_best` once a best tree exists. Every call is safe: an
  * older Pi without the tool-set API simply keeps all tools.
  */
-function toolManager(pi: ExtensionAPI, stuckTestRuns: number, autoContinue: number) {
-  const best = new BestTree(stuckTestRuns, autoContinue);
+function toolManager(pi: ExtensionAPI, stuckTestRuns: number, autoContinue: number, undoWorse = false, undoWorseFrom = 1) {
+  const best = new BestTree(stuckTestRuns, autoContinue, undoWorse, undoWorseFrom);
   const diet = new ToolDiet();
   let baseline: string[] | null = null;
   const sync = (): void => {
@@ -178,7 +177,7 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
   const lim = createLimits(cfg.limits, SESSION);
   const compactor = new Compactor(cfg.limits.compactAt);
   // milestone checkpoints (src/checkpoint.ts): a successful edit/write since the last test run, and that run's text
-  const ckpt = new Checkpointer(cfg.limits.checkpointAt, cfg.limits.checkpointMinSave, cfg.limits.checkpointGap);
+  const ckpt = new Checkpointer(cfg.limits.checkpointAt, cfg.limits.checkpointMinSave, cfg.limits.checkpointGap, { keepFiles: cfg.limits.checkpointKeepFiles, backoff: cfg.limits.checkpointBackoff, skipSame: cfg.limits.checkpointSkipSame });
   let editedSinceTests = false;
   let lastTestText = "";
   const loopLane = cfg.steps.loop.lane;
@@ -406,8 +405,7 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
       resolvePath: (p) => resolve(ctx.cwd, p),
       windowHash: (p, offset, limit) => {
         try {
-          const lines = readFileSync(p, "utf8").split("\n").slice(offset - 1, offset - 1 + limit);
-          return createHash("sha1").update(lines.join("\n")).digest("hex");
+          return windowHash(readFileSync(p, "utf8"), offset, limit);
         } catch {
           return "missing"; // unreadable: let Pi report the error
         }
@@ -436,7 +434,11 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     if (e.toolName === "run_tests") {
       // a milestone (src/checkpoint.ts): the best tree has already seen this run (src/branch.ts run_tests)
       lastTestText = parts.map((p) => p.text).join("");
-      ckpt.tests(milestoneOf(tm.best.verdict, editedSinceTests, parseCounts(lastTestText)), e.toolCallId);
+      const kind = milestoneOf(tm.best.verdict, editedSinceTests, parseCounts(lastTestText));
+      // the tree is hashed only for a steady milestone (the one the same-tree rule can skip)
+      ckpt.tests(kind, e.toolCallId, kind === "steady" || kind === "best" ? treeHash(ctx.cwd) : undefined);
+      if (ckpt.lastSkipped)
+        logCall({ ts: new Date().toISOString(), session: SESSION, workflow: "pi", step: "checkpoint_skip", lane: "", model: "", prompt_tokens: 0, cached_tokens: 0, completion_tokens: 0, ms: 0, status: `steady: same tree as the last checkpoint (${ckpt.skipped} this request)` });
       editedSinceTests = false;
     }
     if (parts.length !== e.content.length || !parts.length) return undefined;
@@ -533,7 +535,17 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
       usableTokens: usable,
       milestones: !lim.stepped,
       view: (ms) => (lim.stepped ? ms : (lim.masker.view(ms as never) as never)),
-      note: (showTests) => {
+      // kept files: the current text on disk, read now (the extension marks these reads as served below)
+      fileText: (p) => {
+        try {
+          return readFileSync(resolve(ctx.cwd, p), "utf8");
+        } catch {
+          return null;
+        }
+      },
+      maxFileLines: cfg.limits.freshFileLines,
+      pathKey: (p) => resolve(ctx.cwd, p),
+      note: (showTests, kept) => {
         const msgs = unchecked as never as Parameters<typeof touchedFiles>[0];
         const req = requestStart(msgs);
         return buildNote({
@@ -544,6 +556,7 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
           last: tm.best.lastCounts,
           lastText: lastTestText,
           showTests,
+          kept: kept.map((p) => relative(ctx.cwd, resolve(ctx.cwd, p)) || p),
           files: touchedFiles(msgs.slice(Math.max(0, req)), ctx.cwd),
           steps: lim.todo.steps,
           notes: lim.todo.notes,
@@ -553,7 +566,10 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     const cp = ckpt.last;
     if (cp) {
       lim.reads.reset(); // the reads are gone from what the model sees: a re-read is served
-      logCall({ ts: new Date().toISOString(), session: SESSION, workflow: "pi", step: "checkpoint", lane: "", model: "", prompt_tokens: cp.tokensBefore, cached_tokens: 0, completion_tokens: 0, ms: 0, status: `${cp.kind}: ${cp.tokensBefore} -> ${cp.tokensAfter} tokens (${cp.removed} messages, note ${cp.noteChars} chars)` });
+      // ... except the kept files: their text is right after the note, so a re-read is pointed at it
+      for (const f of cp.kept) lim.reads.serve(resolve(ctx.cwd, f.path), f.text, lim.turns.count, cfg.limits.viewLines);
+      const keptNote = cp.kept.length ? `, kept ${cp.kept.map((f) => relative(ctx.cwd, resolve(ctx.cwd, f.path)) || f.path).join(" ")}` : "";
+      logCall({ ts: new Date().toISOString(), session: SESSION, workflow: "pi", step: "checkpoint", lane: "", model: "", prompt_tokens: cp.tokensBefore, cached_tokens: 0, completion_tokens: 0, ms: 0, status: `${cp.kind}: ${cp.tokensBefore} -> ${cp.tokensAfter} tokens (${cp.removed} messages, note ${cp.noteChars} chars${keptNote}, gap ${cp.gap})` });
       if (ctx.hasUI) ctx.ui.notify(`tinyCode: checkpoint (${cp.kind}): context ${cp.tokensBefore} -> ${cp.tokensAfter} tokens`, "info");
     }
     const messages = checked ?? unchecked;

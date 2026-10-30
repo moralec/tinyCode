@@ -34,6 +34,14 @@ export interface Config {
   ladder: {
     rung2: boolean;
     rung3: boolean;
+    /** a second quick try after a failed rung 1 (and rung 2 when on), before rung 3: from the best tree when a rung beat the
+     *  original (still-failing names, first error, current files), else a fresh sample of the rung-1 edit (lane seed + 1) */
+    secondTry: boolean;
+    /** quick tries (rung 1, second try): tokens kept free for the reply inside the lane's contextWindow; a prompt that would
+     *  leave less is shrunk (outline, then passing tests, then test output, then the task text), else the quick tries are skipped */
+    replyReserve: number;
+    /** quick tries: prompt characters per token for the fit estimate (2.6: gemma-4-12b read the bowling rung-1 prompt at 2.62) */
+    charsPerToken: number;
     /** rung 3 starts from the best ladder tree when it beats the original (true), or always from the original tree with a
      *  one-line note (false: Pi reasons from clean code, not from a half-wrong edit; the background best tree still guards) */
     keepBest: boolean;
@@ -93,6 +101,17 @@ export interface Config {
     checkpointMinSave: number;
     /** at least this many model calls between two milestone checkpoints (the backstop at the usable line ignores it) */
     checkpointGap: number;
+    /** a checkpoint keeps the current text of the files this request edited (most recently edited first) as one read turn,
+     *  up to this share of the usable prompt; those reads count as served (re-read: "still above"); 0 = off (the note says read before edit) */
+    checkpointKeepFiles: number;
+    /** a milestone checkpoint within 2x the gap of the last one doubles the gap for the next (at most 4x checkpointGap); one later than that resets it to checkpointGap (the usable-line backstop ignores the gap) */
+    checkpointBackoff: boolean;
+    /** a "steady" milestone whose working tree (non-test files) is the one of the last checkpoint is skipped (the cut would rebuild the list the model just looped from) */
+    checkpointSkipSame: boolean;
+    /** a run_tests result worse than the best (fewer pass or more fail) puts the best tree back at once, test files untouched, with one line; the same break 3 times: auto-restore off until a new best */
+    undoWorse: boolean;
+    /** undoWorse acts from the Nth time the same break (counts and failing names) is seen since the best: 1 = at once; 2 = a first break gets the "Worse than best" line and may be fixed forward */
+    undoWorseFrom: number;
     /** a file a workflow just wrote or kept for a hand-over is served whole on its first read (no view or result cap) when it has at most this many lines */
     freshFileLines: number;
     /** test runs in a row without beating the best: best restored, model told to stop and report (0 = off) */
@@ -150,6 +169,8 @@ export interface Config {
 }
 
 const DOOR = "http://127.0.0.1:8080/v1";
+/** the context size assumed for a lane that sets no contextWindow (Pi's provider registration and the ladder's quick tries) */
+export const DEFAULT_CONTEXT_WINDOW = 32768;
 
 export const DEFAULTS: Config = {
   lanes: {
@@ -194,6 +215,11 @@ export const DEFAULTS: Config = {
     // one shot (operator 2026-10-30, 16k window runs): rung 1 only, then Pi's loop; rung 2 cost 13 s and solved nothing there
     rung2: false,
     rung3: true,
+    // a second quick try (issue #10): connect 16k, rung 1 passed in 38 s when its first idea landed, 10 min in Pi when not
+    secondTry: true,
+    // 8k window (P4000 bowling): rung 1 sent 7.1k tokens and its reply hit the window at 1110 tokens, nothing applied
+    replyReserve: 2048,
+    charsPerToken: 2.6,
     keepBest: true,
     skipSolePick: true,
     loopTurnCap: 20,
@@ -227,6 +253,15 @@ export const DEFAULTS: Config = {
     checkpointAt: 0.55,
     checkpointMinSave: 0.1,
     checkpointGap: 4,
+    // steadiness (operator 2026-10-30, dot-dsl / bowling 16k r3 at the 10-minute cap: 16 and 14 checkpoints, each one
+    // dropping the edited file, the model re-reading it, the same cycle again)
+    checkpointKeepFiles: 0.25,
+    checkpointBackoff: true,
+    checkpointSkipSame: true,
+    undoWorse: true,
+    // 2: only a repeated break (operator 2026-10-30). The 16k v2 passes went through worse trees and fixed forward
+    // (bowling r2 28/31 -> 3/31 -> 25/31 -> 31/31, paasio r3 22 -> 12 -> 23 -> 25, sgf r1 16 -> 6 -> 18); 1 = at once
+    undoWorseFrom: 2,
     freshFileLines: 300,
     stuckTestRuns: 3,
     autoContinue: 1,
@@ -282,6 +317,9 @@ export function validate(cfg: Config): Config {
   if (cfg.limits.piCompactReserve + cfg.limits.piKeepRecent > PI_COMPACT_MAX_SUM + 1e-9)
     throw new ConfigError(`limits.piCompactReserve + limits.piKeepRecent: must be at most ${PI_COMPACT_MAX_SUM} (after a compaction the kept part plus the summary must sit well below the trigger at 1 - reserve)`);
   if (typeof cfg.ladder.skipSolePick !== "boolean") throw new ConfigError("ladder.skipSolePick: must be true or false");
+  if (typeof cfg.ladder.secondTry !== "boolean") throw new ConfigError("ladder.secondTry: must be true or false");
+  if (!(Number.isInteger(cfg.ladder.replyReserve) && cfg.ladder.replyReserve > 0)) throw new ConfigError("ladder.replyReserve: must be a positive integer (tokens)");
+  if (!(typeof cfg.ladder.charsPerToken === "number" && cfg.ladder.charsPerToken >= 1 && cfg.ladder.charsPerToken <= 8)) throw new ConfigError("ladder.charsPerToken: must be a number from 1 to 8");
   if (!(Number.isInteger(cfg.ladder.reviewDiffChars) && cfg.ladder.reviewDiffChars > 0)) throw new ConfigError("ladder.reviewDiffChars: must be a positive integer");
   for (const k of ["reviewFileLines", "reviewFailBlocks", "keptFailNames"] as const)
     if (!(Number.isInteger(cfg.ladder[k]) && cfg.ladder[k] > 0)) throw new ConfigError(`ladder.${k}: must be a positive integer`);
@@ -291,6 +329,10 @@ export function validate(cfg: Config): Config {
   if (!(typeof cfg.limits.checkpointAt === "number" && cfg.limits.checkpointAt >= 0 && cfg.limits.checkpointAt <= 1)) throw new ConfigError("limits.checkpointAt: must be a share of the context window from 0 (off) to 1");
   if (!(typeof cfg.limits.checkpointMinSave === "number" && cfg.limits.checkpointMinSave >= 0 && cfg.limits.checkpointMinSave < 1)) throw new ConfigError("limits.checkpointMinSave: must be a share of the context window in [0, 1)");
   if (!(Number.isInteger(cfg.limits.checkpointGap) && cfg.limits.checkpointGap >= 1)) throw new ConfigError("limits.checkpointGap: must be an integer >= 1 (model calls)");
+  if (!(typeof cfg.limits.checkpointKeepFiles === "number" && cfg.limits.checkpointKeepFiles >= 0 && cfg.limits.checkpointKeepFiles < 1)) throw new ConfigError("limits.checkpointKeepFiles: must be a share of the usable prompt in [0, 1) (0 = off)");
+  for (const k of ["checkpointBackoff", "checkpointSkipSame", "undoWorse"] as const)
+    if (typeof cfg.limits[k] !== "boolean") throw new ConfigError(`limits.${k}: must be true or false`);
+  if (!(Number.isInteger(cfg.limits.undoWorseFrom) && cfg.limits.undoWorseFrom >= 1)) throw new ConfigError("limits.undoWorseFrom: must be an integer >= 1 (1 = at once)");
   for (const k of ["maskAboveTokens", "scriptLines", "freshFileLines"] as const)
     if (!(Number.isInteger(cfg.limits[k]) && cfg.limits[k] > 0)) throw new ConfigError(`limits.${k}: must be a positive integer`);
   for (const k of ["stuckTestRuns", "autoContinue"] as const)

@@ -242,7 +242,8 @@ test("the extension, lite: the background layer is unchanged (compaction, read n
     return join(cwd, f);
   };
   const results: Record<string, unknown[]> = {};
-  for (const [name, file] of [["lite", tcfg("bg-lite.json", { intercept: LITE })], ["all", tcfg("bg-all.json", { intercept: ALL })]] as const) {
+  // undoWorse off: this pins the "Worse than best" line (auto-undo has its own test in tools.test.ts)
+  for (const [name, file] of [["lite", tcfg("bg-lite.json", { intercept: LITE, limits: { undoWorse: false } })], ["all", tcfg("bg-all.json", { intercept: ALL, limits: { undoWorse: false } })]] as const) {
     const { handlers, tools } = await load({ TINYCODE_CONFIG: file, TINYCODE_LOG: join(cwd, "calls.jsonl") });
     const ctx = { cwd, hasUI: false, model: MODEL, getSystemPrompt: () => "S" };
     const call = (n: string, e: Record<string, unknown>) => (handlers.get(n) ?? []).map((h) => h(e, ctx));
@@ -321,4 +322,45 @@ test("the extension: a run_tests milestone checkpoints what is sent (note, reque
   assert.ok(out.length <= 4, "request + note, the last turn, the tail");
   const rows = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { step: string; status: string });
   assert.ok(rows.some((x) => x.step === "checkpoint" && /^best: \d+ -> \d+ tokens/.test(x.status)), "one checkpoint record");
+});
+
+test("the extension, kept files: a checkpoint after an edit sends the file's text on disk after the note; a re-read is pointed at it once, then served", async () => {
+  const cwd = repo();
+  writeFileSync(join(cwd, "out.txt"), "FAILED t::a - x\n7 failed, 24 passed in 0.1s\n");
+  const src = readFileSync(join(cwd, "orders/report.py"), "utf8");
+  const lane = { baseUrl: "http://127.0.0.1:9/v1", model: "m" };
+  const file = join(cwd, "ckpt-keep.json");
+  writeFileSync(file, JSON.stringify({ lanes: { trunk: lane, small: lane }, orchestration: "model", intercept: LITE, test: { command: "cat out.txt; false" } }));
+  const log = join(cwd, "calls-keep.jsonl");
+  const { handlers, tools } = await load({ TINYCODE_CONFIG: file, TINYCODE_LOG: log });
+  const ctx = { cwd, hasUI: false, model: { ...MODEL, contextWindow: 16384 }, getSystemPrompt: () => "S".repeat(2000) };
+  const call = (n: string, e: Record<string, unknown>) => (handlers.get(n) ?? []).map((h) => h(e, ctx));
+  const t = (s: string) => [{ type: "text", text: s }];
+  await call("before_agent_start", { prompt: R.explain, systemPrompt: "B" })[0];
+  const msgs: Record<string, unknown>[] = [{ role: "user", content: t(R.explain), timestamp: 1 }];
+  for (let i = 0; i < 8; i++) {
+    msgs.push({ role: "assistant", content: [{ type: "toolCall", id: `r${i}`, name: "read", arguments: { path: join(cwd, "orders/other.py"), offset: i * 100 + 1 } }], timestamp: 10 + i * 3 });
+    msgs.push({ role: "toolResult", toolCallId: `r${i}`, toolName: "read", content: t("x".repeat(4000)), isError: false, timestamp: 11 + i * 3 });
+  }
+  msgs.push({ role: "assistant", content: [{ type: "toolCall", id: "e1", name: "edit", arguments: { path: "orders/report.py", edits: [{ oldText: "a", newText: "b" }] } }], timestamp: 40 });
+  msgs.push({ role: "toolResult", toolCallId: "e1", toolName: "edit", content: t("Successfully replaced 1 block(s)."), isError: false, timestamp: 41 });
+  call("tool_result", { toolName: "edit", toolCallId: "e1", input: { path: "orders/report.py" }, isError: false, content: t("ok") });
+  msgs.push({ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "run_tests", arguments: {} }], timestamp: 50 });
+  const r = await (tools.get("run_tests") as unknown as { execute: Exec }).execute("t1", {}, undefined, undefined, ctx);
+  msgs.push({ role: "toolResult", toolCallId: "t1", toolName: "run_tests", content: r.content, isError: false, timestamp: 51 });
+  call("tool_result", { toolName: "run_tests", toolCallId: "t1", input: {}, isError: false, content: r.content });
+  const out = (call("context", { messages: msgs })[0] as { messages: { role: string; content: unknown; toolCallId?: string; toolName?: string }[] }).messages;
+  assert.match(JSON.stringify(out[0]!.content), /\[checkpoint\] Older steps removed\. Current text below: orders\/report\.py\. Other files: read before edit\./);
+  assert.deepEqual(out.slice(1, 5).map((m) => m.role), ["assistant", "toolResult", "assistant", "toolResult"]);
+  assert.equal(out[2]!.toolName, "read");
+  assert.equal((out[2]!.content as { text: string }[])[0]!.text, src, "the text on disk");
+  assert.equal(out[4]!.toolCallId, "t1", "the milestone's turn is kept after it");
+  const rows = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { step: string; status: string });
+  assert.ok(rows.some((x) => x.step === "checkpoint" && /kept orders\/report\.py, gap 4\)$/.test(x.status)), "logged with the kept file and the gap");
+  // the model reads the kept file again: one pointer (not an intervention), then it is served
+  const read = (id: string) => call("tool_call", { toolName: "read", toolCallId: id, input: { path: "orders/report.py" } })[0] as { block?: boolean; reason?: string } | undefined;
+  assert.deepEqual(read("rr1"), { block: true, reason: "Unchanged since the checkpoint; its text is above. Need it again: ask again, it is served." });
+  assert.equal(read("rr2"), undefined, "asked again: served");
+  // an unkept file read before the checkpoint is served at once (its read was cut away)
+  assert.equal(call("tool_call", { toolName: "read", toolCallId: "rr3", input: { path: join(cwd, "orders/other.py"), offset: 1 } })[0], undefined);
 });
