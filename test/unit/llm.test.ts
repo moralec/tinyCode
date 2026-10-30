@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig } from "../../src/config.ts";
 import { chat, LlmError, type Transport, type TransportRequest } from "../../src/llm.ts";
 import { formatStats, readCalls } from "../../src/log.ts";
@@ -20,7 +20,7 @@ const ok = (content: string, extra = {}) => ({
   },
 });
 function env() {
-  const log = join(mkdtempSync(join(tmpdir(), "tinycode-llm-")), "calls.jsonl");
+  const log = join(tmpDir("tinycode-llm-"), "calls.jsonl");
   return { log, env: { TINYCODE_LOG: log, ALT_KEY: "secret-value" } as Record<string, string> };
 }
 const msgs = [{ role: "user" as const, content: "hi" }];
@@ -105,4 +105,24 @@ test("log line has every field; stats show per-step calls and cache-hit %", asyn
   assert.equal(rec.completion_tokens, 5);
   assert.equal(rec.status, 200);
   assert.match(formatStats(readCalls(e.env)), /hunk\s+2\s+200\s+60%/);
+});
+
+test("request body: lane temperature and seed are sent; no seed unless set", async () => {
+  const e = env();
+  let seen: TransportRequest | undefined;
+  const transport: Transport = async (r) => ((seen = r), ok("{}"));
+  await chat("pick", msgs, { config: cfg, transport, env: e.env });
+  assert.equal((seen!.body as any).temperature, 0);
+  assert.equal("seed" in (seen!.body as object), false);
+  const hot = mergeConfig({ lanes: { trunk: { temperature: 0.3, seed: 1234 } } });
+  await chat("pick", msgs, { config: hot, transport, env: e.env });
+  assert.equal((seen!.body as any).temperature, 0.3);
+  assert.equal((seen!.body as any).seed, 1234);
+});
+
+test("the server's finish_reason is kept on the result (a cut reply is told apart from a short one)", async () => {
+  const e = env();
+  const cut: Transport = async () => ({ status: 200, json: { choices: [{ message: { content: '{"findings":[{"line"' }, finish_reason: "length" }], usage: {} } });
+  assert.equal((await chat("hunk", msgs, { config: cfg, transport: cut, env: e.env })).finish, "length");
+  assert.equal((await chat("hunk", msgs, { config: cfg, transport: async () => ok("{}"), env: e.env })).finish, undefined);
 });

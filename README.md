@@ -2,93 +2,54 @@
 
 <h1 align="center">tinyCode</h1>
 
-<p align="center">A <a href="https://github.com/earendil-works/pi">Pi</a> extension for coding with small local models, built to spend as few tokens as possible on every call.</p>
+<p align="center">A <a href="https://github.com/earendil-works/pi">Pi</a> extension that keeps the context small, so local models finish coding tasks in a 16k window where plain Pi runs out of room.</p>
 
-> **Preview — v0.1.** Works, but rough edges remain; see [Known issues](#known-issues-v01). Feedback welcome via GitHub issues.
+> **Preview — v1.0.** Works, but rough edges remain; see [Known issues](#known-issues-v10). Feedback welcome via GitHub issues.
 
 ## Why
 
-Coding agents work by trial and error: the model reads a file, runs the tests, reads another, and everything it saw
-stays in the conversation and is sent again on every call. With a small model on a modest GPU, that growing
-conversation is most of the cost and most of the wait.
-
-tinyCode moves the routine part of the work from the model to code, and gives the model only what each step needs.
-Big jobs become a series of small ones, each in a fresh context.
-
-To decide what to build, we mapped the activities developers most often ask coding assistants and CLI agents for,
-from published studies of real use (tens of thousands of real chat messages, plus developer surveys): changing
-code, fixing bugs, explaining code, writing tests, documenting, planning, adding new code, committing, and general
-questions. Each one got its own workflow, designed for a small context: code gathers exactly what that kind of job
-needs, the model makes one or two narrow calls, and code checks the result.
+On a local GPU the context window is the real limit. The KV cache grows with it and competes with the model for
+memory, so a 16 GB card running a good model often has 16k of context to spare, not 128k. Coding agents fill that
+window fast: every file read, test run and edit stays in the conversation and is sent again on every call. At 16k,
+plain Pi regularly stops mid-task with the window full.
 
 ## What
 
-You work in Pi exactly as you would with any coding assistant: type what you want in plain language. Behind the
-scenes, tinyCode recognises the kind of job and runs it its own way, with code doing the routine work and the model
-doing only the thinking.
+tinyCode sits under Pi and keeps the window small, without changing how you work:
 
-```
-> the monthly report puts every day in its own bucket, can you fix it?
-  I'll find why the monthly report groups by day and fix it.
-  ✓ pick files · ✓ edit · ✓ tests
-  Fixed: the date helper used the day instead of the month (orders/dates.py). Tests pass. (2 calls, 17 s)
-```
+- **Old output is hidden** once it is no longer needed, while the files you are working on stay visible.
+- **Save, clean, continue.** At natural milestones (the tests reach a new best, or an edit is confirmed by a test
+  run), code writes a short note of where the work stands (tests passing, files touched, what still fails) and the
+  history before it is replaced by that note. No model call is needed, and the full history stays in Pi's log.
+- **The best state is kept.** The best test result reached is saved, so a run never ends below it.
 
-It says in one sentence what it's about to do, shows its progress, and reports the result in plain words. It asks first
-only before irreversible steps you didn't ask for (such as committing). Anything that isn't a coding job (a question, a
-chat) goes to Pi as usual. The commands are there if you'd rather be explicit:
+It also takes over the two jobs it does faster than Pi on its own:
 
-### Commands
+- **Fixing failing tests:** one quick, narrow try first; if that doesn't pass, Pi's own loop takes over.
+- **Writing tests:** tests that must pass on today's code.
 
-| Command | What it's for |
-|---|---|
-| `/add` | Add new code (a function, an option, an endpoint) together with a test that proves it works. |
-| `/edit` | Change existing code as described, with file-type checks (Python compiles, AppleScript recompiles on macOS). |
-| `/fix` | Make a failing test pass, or fix a described bug. |
-| `/explain` | Explain code in this project, with every file and line reference checked. |
-| `/test` | Write tests for existing code. They must pass on today's code; a failure that looks like a bug is reported, never papered over. |
-| `/doc` | Add comments and docstrings without touching the code, or write a project overview / update README sections from summaries of every file. |
-| `/review` | Review your current changes, one hunk at a time, and list findings with file and line. |
-| `/commit` | Write a commit message from your changes and commit after you confirm. |
-| `/ask` | Answer a general question in one call, without touching the project. |
-| `/research` | Answer "is there a library for X?" or "how do others do Y?" from GitHub and the web, in a separate context, with links. |
-| `/plan` | Turn "I want to build X" into a short spec and a list of small tasks, each with a test. |
-| `/build` | Work through the plan one task at a time: write the test, make it pass, run the suite, commit. |
+Everything else (questions, edits, new code, reviews) goes to Pi exactly as without tinyCode. The other workflows
+are there as explicit commands (`/explain`, `/doc`, `/review`, …) but are not used automatically yet: in our tests
+they were not better than plain Pi.
 
-One command per common activity, each optimised for a low-context setup. After any edit, your project's own
-formatter and linter run if you have them set up.
+## Results
 
-## How
+Qwen3.6-35B-A3B on one 16 GB T4, **16k context window**, the same tasks and prompts for both. The five tasks are the
+Aider polyglot Python exercises where plain Pi needed more than 14k of context when it had 32k; with 32k, Pi alone
+solves all five. At 16k:
 
-Why it stays fast and small on modest hardware:
+| Task | Pi alone | Pi + tinyCode |
+|---|---|---|
+| connect | ✗ context full (4 failed, 6 passed) | ✗ time cap (1 failed, 9 passed) |
+| bowling | ✗ context full (6 failed, 25 passed) | ✓ 557 s |
+| dot-dsl | ✓ 38 s | ✓ 236 s |
+| paasio | ✗ reply cut (window full) (1 failed, 24 passed) | ✓ 347 s |
+| sgf-parsing | ✗ context full (17 failed, 6 passed) | ✓ 539 s |
+| **solved** | **1 of 5 runs** | **4 of 5 runs** |
 
-- **The ladder.** Every fix starts with a checklist: code runs the test, outlines the project and lets the model
-  pick the files, and the model answers with small find-and-replace edits. That's usually two calls. If it fails, a
-  separate call reviews the error and the attempt, and the checklist tries once more. Only then does Pi's full loop
-  take over, from a clean copy.
-- **Adaptive Ladder.** tinyCode learns which approach is most efficient for your model. Models that rarely succeed
-  at the checklist start in the loop, and get retried now and then.
-- **Subagents, everywhere.** Research, side questions and each build task run in their own context, and only the
-  result returns. The main conversation grows by answers, never by search output.
-- **Prompts that stay the same from call to call**, so llama.cpp's prompt cache does most of the reading.
-- **Limits on the loop:** repeated calls are stopped, long tool output is trimmed, and old output is hidden.
+One run per task so far, a 10-minute cap per run; repeat runs are being added ([#1](https://github.com/moralec/tinyCode/issues/1)). Where plain Pi ran out of room, tinyCode kept the window under its limit and finished, but slowly: 6 to 9 minutes. Where both finish, plain Pi is faster (dot-dsl: 38 s against 236 s). Making those runs shorter is the next step.
 
-## Early numbers
-
-Ten coding tasks where the task text never names the file to change (hidden bugs, multi-file features, a refactor,
-a config fix, planted bugs in two real projects). Each task has a test that decides pass or fail. One run per cell,
-tasks written by us: read it as direction, not proof.
-
-| Gemma 4 12B on a 16 GB T4 | passed | calls per task | prompt tokens per task | typical time |
-|---|---|---|---|---|
-| **tinyCode ladder** | **10/10** | **3** | **about 6,000** | **20 s** |
-| Pi on its own | 7/10 | 21 | about 144,000 | 83 s |
-
-With Qwen 3.5 4B on an 8 GB card, both pass 9–10 of 10, and most tasks need the loop, which is what the Adaptive
-Ladder learns. Setup: llama.cpp `llama-server`, temperature 0, thinking off, 30 calls or 30 minutes per task.
-A fuller benchmark (repeated runs plus a third-party task set) is coming.
-
-Pi alone against Pi with tinyCode on nine public Python exercises (Aider's polyglot benchmark), two models, updated as runs finish: [bench/RESULTS.md](bench/RESULTS.md).
+Method and every run: [bench/RESULTS.md](bench/RESULTS.md).
 
 ## Installation
 
@@ -125,27 +86,36 @@ Two models we recommend, from our own measurements on one GPU:
 | Model | Qwen3.6-35B-A3B | gemma-4-12b-it |
 | File | `UD-IQ3_XXS` from [unsloth/Qwen3.6-35B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF), about 13 GB | `IQ4_XS` from [unsloth/gemma-4-12b-it-GGUF](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF), about 6.4 GB |
 
-Start either with the same alias, so tinyCode's setup doesn't change:
+Start either with the same alias, so tinyCode's setup doesn't change. The results above use a 16k window; a larger one
+works too, and tinyCode then rarely needs to step in:
 
 ```
-llama-server -m <model file> -a tinycode-model -ngl 99 -c 32768 -np 1 -fa on --jinja --reasoning-budget 0 --port 8080
+llama-server -m <model file> -a tinycode-model -ngl 99 -c 16384 -np 1 -fa on --jinja --reasoning-budget 0 --port 8080
 ```
+
+Tell tinyCode the window you chose, so it can size its milestones: `sh install.sh --trunk-context 16384 --small-context 16384`
+(`install.ps1 -TrunkContext 16384 -SmallContext 16384`).
 
 ### Using it
 
-Run `pi` in your project and ask in plain language: tinyCode says what it's about to do, then does it. Or use the
-commands above (`/fix`, `/edit`, `/review`, ...). `/tinycode` prints the effective configuration and `/tinycode stats`
-the calls per step. It runs in auto mode by default; `/dev on` turns on diagnostics (router hints, events, per-call
-tokens) and `/dev off` turns them off.
+Run `pi` in your project and work as you normally would. When you ask to make failing tests pass, or to write
+tests, tinyCode runs its own workflow; everything else goes to Pi as usual, with tinyCode keeping the context small
+underneath. The other workflows are available as explicit commands: `/edit`, `/add`, `/explain`, `/doc`, `/review`,
+`/commit`, `/ask`, `/research`, `/plan`, `/build`. `/tinycode` prints the effective configuration and `/tinycode stats`
+the calls per step; `/dev on` turns on diagnostics (events, per-call tokens) and `/dev off` turns them off.
 
-## Known issues (v0.1)
+## Roadmap
 
-1. README updates can "correct" statements that were already right: review the diff before keeping it.
-2. `/fix` without a failing test may search a long time when the described bug isn't there.
+v1.1 aims at an 8k window (8 GB cards and laptops), v1.2 at bugs described in words, v1.3 at handing jobs to your local
+machine from another agent: [ROADMAP.md](ROADMAP.md).
+
+## Known issues (v1.0)
+
+1. After a milestone the model re-reads the files it needs, so a run with several milestones takes longer than one
+   without.
+2. On tasks plain Pi also finishes, tinyCode is slower so far (dot-dsl at 16k: 236 s against 38 s).
 3. `install.ps1` is untested on real Windows.
-4. Some plain-language requests run in Pi's general loop instead of a workflow, which is slower.
-5. With small models, tool choice is weaker when the request is ambiguous; naming the file helps.
-6. Results so far are from our own small benchmark on one machine.
+4. Results so far are from five tasks on one machine and one model.
 
 ## Licence
 

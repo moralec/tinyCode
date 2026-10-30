@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {  } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { logCall } from "../../src/log.ts";
 import { createProgress, fmtTime, fmtTok, type ProgressOptions, type ProgressSink } from "../../src/progress.ts";
 
@@ -188,7 +188,7 @@ test("end summary: outcome, what changed, calls, tokens (cached %), time, next s
 });
 
 test("counters come from the call log, the records /tinycode stats reads; stop listening when done", () => {
-  const env = { TINYCODE_LOG: join(mkdtempSync(join(tmpdir(), "tc-prog-")), "calls.jsonl") };
+  const env = { TINYCODE_LOG: join(tmpDir("tc-prog-"), "calls.jsonl") };
   const sink = { status() {}, widget() {}, message() {}, err() {}, interactive: true } satisfies ProgressSink;
   const p = createProgress({ workflow: "x", sink });
   const rec = (n: number) => ({ ts: "", session: "s", workflow: "x", step: "edit", lane: "l", model: "m", prompt_tokens: n, cached_tokens: n / 2, completion_tokens: 1, ms: 1, status: 200 });

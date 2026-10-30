@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig, type Config } from "../../src/config.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
 import { actionable, buildIndex, heuristic, route } from "../../src/router.ts";
@@ -12,7 +12,7 @@ import { PICK_SCHEMA } from "../../src/workflows/fix.ts";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const PY = (process.env.TINYCODE_TEST_PYTHON ?? "python3");
-const cfg = (): Config => mergeConfig({ test: { python: PY } });
+const cfg = (): Config => mergeConfig({ test: { python: PY }, ladder: { skipSolePick: false } }); // the scripted replies include the pick
 
 function scripted(replies: string[]) {
   const calls: { step: string; messages: Message[]; schema?: object }[] = [];
@@ -27,7 +27,7 @@ function scripted(replies: string[]) {
 const block = (path: string, search: string, replace: string) => `${path}\n<<<<<<< SEARCH\n${search}\n=======\n${replace}\n>>>>>>> REPLACE\n`;
 
 function mk(files: Record<string, string>) {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-add-"));
+  const d = tmpDir("tinycode-add-");
   const cwd = join(d, "repo");
   for (const [f, t] of Object.entries(files)) {
     mkdirSync(join(cwd, f, ".."), { recursive: true });
@@ -36,7 +36,7 @@ function mk(files: Record<string, string>) {
   return { cwd, env: { TINYCODE_LOG: join(d, "state", "calls.jsonl") } };
 }
 const slug = () => {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-add-"));
+  const d = tmpDir("tinycode-add-");
   const cwd = join(d, "repo");
   cpSync(join(ROOT, "test/fixtures/task-repos/t03-slugify"), cwd, { recursive: true, filter: (s) => !s.includes("__pycache__") });
   return { cwd, env: { TINYCODE_LOG: join(d, "state", "calls.jsonl") } };
@@ -209,4 +209,75 @@ test("lint wired into /fix: after a rung-1 pass, on the files the ladder changed
   assert.equal(r.solvedBy, "rung1");
   assert.deepEqual(ran, ["ruff check --fix --quiet textutil.py", "ruff format --quiet textutil.py"]);
   assert.ok(lines.some((l) => /^lint: ruff check --fix on 1 file/.test(l)));
+});
+
+const testBlock = (body: string) => block("tests/test_textutil.py", "", body);
+const WC = block("textutil.py", "def title_case(text):", "def word_count(text):\n    return len(text.split())\n\n\ndef title_case(text):");
+
+test("code edit does not apply but the test was written: ladder fails -> everything is undone, with the reason", async () => {
+  const { cwd, env } = slug();
+  const before = readFileSync(join(cwd, "textutil.py"), "utf8");
+  const s = scripted([
+    block("textutil.py", "def no_such_anchor(text):", "def word_count(text):\n    return 1") + testBlock("from textutil import word_count\n\n\ndef test_wc():\n    assert word_count('a b') == 2\n"),
+    JSON.stringify({ files: ["textutil.py"], reason: "x" }),
+    "no blocks here",
+    JSON.stringify({ diagnosis: "d", where: [], next_step: "n" }),
+    "still nothing",
+  ]);
+  const lines: string[] = [];
+  const r = await runAdd({ file: "textutil.py", task: "add word_count" }, { cwd, config: cfg(), chat: s.chat, report: (l) => lines.push(l), env });
+  assert.equal(r.ok, false);
+  assert.equal(r.fix?.solvedBy, "none");
+  assert.ok(lines.some((l) => /the code edit didn't apply to textutil\.py: the SEARCH text was not found/.test(l)));
+  assert.deepEqual(r.undone?.removed, ["tests/test_textutil.py"]);
+  assert.deepEqual(r.files, []);
+  assert.equal(readFileSync(join(cwd, "textutil.py"), "utf8"), before);
+  assert.equal(existsSync(join(cwd, "tests/test_textutil.py")), false, "the new test is gone");
+});
+
+test("hand-over that ends without a passing test restores a changed target too", async () => {
+  const { cwd, env } = slug();
+  const before = readFileSync(join(cwd, "textutil.py"), "utf8");
+  const s = scripted([
+    block("textutil.py", "def title_case(text):", "def word_count(text):\n    return -1\n\n\ndef title_case(text):") + testBlock("from textutil import word_count\n\n\ndef test_wc():\n    assert word_count('a b') == 2\n"),
+    JSON.stringify({ files: ["textutil.py"], reason: "x" }),
+    "no blocks",
+    JSON.stringify({ diagnosis: "d", where: [], next_step: "n" }),
+    "no blocks",
+  ]);
+  const r = await runAdd({ file: "textutil.py", task: "add word_count" }, { cwd, config: cfg(), chat: s.chat, report: () => {}, env });
+  assert.equal(r.ok, false);
+  assert.equal(readFileSync(join(cwd, "textutil.py"), "utf8"), before);
+  assert.equal(existsSync(join(cwd, "tests/test_textutil.py")), false);
+  assert.ok(r.undone?.restored.includes("textutil.py"));
+});
+
+test("new test fails at collection: one retry with the error, then it passes", async () => {
+  const { cwd, env } = slug();
+  const s = scripted([
+    WC + testBlock("from textutil import word_cnt\n\n\ndef test_wc():\n    assert word_cnt('a b') == 2\n"),
+    block("tests/test_textutil.py", "from textutil import word_cnt\n\n\ndef test_wc():\n    assert word_cnt('a b') == 2", "from textutil import word_count\n\n\ndef test_wc():\n    assert word_count('a b') == 2"),
+  ]);
+  const r = await runAdd({ file: "textutil.py", task: "add word_count" }, { cwd, config: cfg(), chat: s.chat, report: () => {}, env });
+  assert.equal(r.ok, true);
+  assert.equal(r.calls, 2);
+  assert.equal(r.fix, undefined);
+  const last = s.calls[1].messages;
+  assert.equal(last[2].role, "assistant");
+  assert.match(last[3].content, /fails before any test runs[\s\S]*ImportError|cannot import/);
+});
+
+test("new test still fails at collection after the retry: undone, no ladder", async () => {
+  const { cwd, env } = slug();
+  const before = readFileSync(join(cwd, "textutil.py"), "utf8");
+  const bad = testBlock("def test_wc(:\n    pass\n");
+  const s = scripted([WC + bad, block("tests/test_textutil.py", "def test_wc(:\n    pass", "def test_wc(:\n    pass2")]);
+  const lines: string[] = [];
+  const r = await runAdd({ file: "textutil.py", task: "add word_count" }, { cwd, config: cfg(), chat: s.chat, report: (l) => lines.push(l), env });
+  assert.equal(r.ok, false);
+  assert.equal(r.fix, undefined);
+  assert.equal(s.calls.length, 2);
+  assert.equal(readFileSync(join(cwd, "textutil.py"), "utf8"), before);
+  assert.equal(existsSync(join(cwd, "tests/test_textutil.py")), false);
+  assert.ok(lines.some((l) => /still fails at collection/.test(l)));
 });

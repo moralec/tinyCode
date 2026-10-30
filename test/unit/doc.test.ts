@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig, type Config } from "../../src/config.ts";
 import { langOf, listSymbols, sameCode, stripped } from "../../src/context/strip.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
 import { actionable, buildIndex, heuristic } from "../../src/router.ts";
-import { applyDocBlocks, batchSymbols, docArgsFromText, makeCompile, parseDocArgs, runDoc } from "../../src/workflows/doc.ts";
+import { applyDocBlocks, batchSymbols, docArgsFromText, docTargets, makeCompile, namedHeadings, parseDocArgs, runDoc } from "../../src/workflows/doc.ts";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const PY = (process.env.TINYCODE_TEST_PYTHON ?? "python3");
@@ -25,7 +25,7 @@ function scripted(replies: string[]) {
 }
 const block = (path: string, search: string, replace: string) => `${path}\n<<<<<<< SEARCH\n${search}\n=======\n${replace}\n>>>>>>> REPLACE\n`;
 function mk(files: Record<string, string>) {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-doc-"));
+  const d = tmpDir("tinycode-doc-");
   for (const [f, t] of Object.entries(files)) {
     mkdirSync(join(d, f, ".."), { recursive: true });
     writeFileSync(join(d, f), t);
@@ -250,4 +250,54 @@ test("arguments and routing: /doc forms, routed text, router parity words", () =
   for (const g of ["update the readme", "write the overview", "write a README for the exporter that covers the formats", "the readme needs a section on the cli commands", "refresh the overview page"]) assert.equal(rd(g), "doc", g);
   for (const g of ["uploads over 2.5MB get rejected but the readme promises 25MB", "DESIGN.md should explain the short/long sub-rank now"]) assert.equal(rd(g), null, g);
   assert.equal(h("update the overview").workflow, "readme");
+});
+
+test("readme args keep every value of a quoted comma list; headings named in prose are whole words outside paths, the title only when asked", () => {
+  assert.deepEqual(parseDocArgs('readme --update "exporter","Usage" --max-files 3').readme.update, ["exporter", "Usage"]);
+  assert.deepEqual(parseDocArgs("readme --update 'A', 'B'").readme, { ...parseDocArgs("readme").readme, update: ["A", "B"] });
+  const hs = [{ title: "exporter", level: 1 }, { title: "Usage", level: 2 }, { title: "Layout", level: 2 }, { title: "Use", level: 2 }];
+  // doc-3-readme: "exporter" is in a path and is the title; "Use" is not a whole word of "Usage"
+  assert.deepEqual(docArgsFromText("Update the Usage section of README.md so it matches what exporter/cli.py actually does.", hs).readme.update, ["Usage"]);
+  assert.deepEqual(namedHeadings("update the readme's exporter section and the usage", hs), ["exporter", "Usage"]);
+  assert.deepEqual(namedHeadings('fix "exporter" in the readme', hs), ["exporter"]);
+  assert.deepEqual(namedHeadings("the readme layout is stale; see `layout.md`", hs), ["Layout"]);
+});
+
+test("doc targets: every named file, and the code files of a named package; one or none leaves it to findTarget", () => {
+  const files = ["cal/leap.py", "cal/months.py", "cal/__init__.py", "todo/model.py", "todo/cli.py", "todo/__init__.py", "tests/test_todo.py", "calc.py"];
+  const src: Record<string, string> = { "cal/leap.py": "def is_leap(y):\n    return 1\n", "cal/months.py": "def days(m):\n    return 1\n", "todo/model.py": "class Task:\n    id: int\n", "todo/cli.py": "def main():\n    pass\n", "todo/__init__.py": "", "cal/__init__.py": "" };
+  const read = (f: string) => src[f] ?? null;
+  assert.deepEqual(docTargets("Add docstrings to every function in cal/leap.py and cal/months.py.", files, read), ["cal/leap.py", "cal/months.py"]);
+  assert.deepEqual(docTargets("Add docstrings to the todo package: every function and the Task class.", files, read), ["todo/model.py", "todo/cli.py"]);
+  assert.deepEqual(docTargets("add docstrings to calc.py", files, read), []);
+  assert.deepEqual(docTargets("add a docstring to Task", files, read), []);
+});
+
+test("/doc on a request naming two files documents both; one that fails is handed back in `left`", async () => {
+  const { cwd, env } = mk({ "a.py": "def one(x):\n    return x\n", "b.py": "def two(x):\n    return x\n" });
+  const ra = block("a.py", "def one(x):\n    return x", 'def one(x):\n    """Return x."""\n    return x');
+  const rb = block("b.py", "def two(x):\n    return x", 'def two(x):\n    """Return x."""\n    return x');
+  const { r, lines } = await run(cwd, env, scripted([ra, rb]).chat, "Add docstrings to a.py and b.py", { lint: { find: () => null } });
+  assert.equal(r.ok, true, lines.join("\n"));
+  assert.deepEqual(r.files, ["a.py", "b.py"]);
+  assert.deepEqual(r.left, []);
+  assert.match(read(cwd, "b.py"), /"""Return x\."""/);
+  // b's reply never applies: a is written, b is left with its reason
+  const two = mk({ "a.py": "def one(x):\n    return x\n", "b.py": "def two(x):\n    return x\n" });
+  const bad = await run(two.cwd, two.env, scripted([ra, "no blocks", "still none"]).chat, "Add docstrings to a.py and b.py", { lint: { find: () => null } });
+  assert.equal(bad.r.ok, true);
+  assert.deepEqual(bad.r.files, ["a.py"]);
+  assert.deepEqual(bad.r.left, ["b.py (nothing-applied)"]);
+});
+
+test("/doc on one file naming several symbols asks for each of them; every/all asks for the whole file", async () => {
+  const ask = async (task: string) => {
+    const { cwd, env } = mk({ "calc.py": CALC });
+    const s = scripted(["no blocks", "no blocks", "no blocks", "no blocks"]);
+    await run(cwd, env, s.chat, task, { lint: { find: () => null } });
+    return String(s.calls[0]!.messages[1]!.content).split("\n").filter((l) => l.startsWith("- "));
+  };
+  assert.deepEqual(await ask("write docstrings for clamp and grow in calc.py"), ["- function clamp", "- method Box.grow"]);
+  assert.deepEqual(await ask("write a docstring for clamp in calc.py"), ["- function clamp"]);
+  assert.equal((await ask("docstrings for every function in calc.py, clamp included")).length, 6);
 });

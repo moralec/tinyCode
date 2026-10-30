@@ -41,11 +41,11 @@ export const PLAN_SCHEMA = {
   required: ["spec", "stack", "tasks"],
 };
 
-export const PLAN_SYSTEM = `You plan a small software change for a developer. Turn the request into a short spec and an ordered task list.
-Reply with JSON: {"spec":"<3-6 sentences: what it does and how it behaves>","stack":"<language, libraries, test tool>","tasks":[{"id":1,"title":"<one short sentence>","files":["<relative path>"],"test":"<the test that defines done: file and what it checks>"}]}
-Rules: ${MIN_TASKS} to ${MAX_TASKS} tasks, ids 1,2,3,... in the order they should be built. Each task is small: one behaviour, one or two files.
-files are paths relative to the project root, never absolute. Each task names the test that proves it is done, written before the code.
-Early tasks set up what later tasks need. Use the existing files and conventions when the project already has code.`;
+export const PLAN_SYSTEM = `Plan a small software change: short spec plus ordered task list.
+Reply JSON: {"spec":"<3-6 sentences: what it does, how it behaves>","stack":"<language, libraries, test tool>","tasks":[{"id":1,"title":"<one short sentence>","files":["<relative path>"],"test":"<test that defines done: file and what it checks>"}]}
+${MIN_TASKS} to ${MAX_TASKS} tasks, ids 1,2,3,... in build order. Task = one behaviour, one or two files.
+files: paths relative to project root, never absolute. Each task names the test that proves it done, written before the code.
+Early tasks set up what later ones need. Existing code: follow its files and conventions.`;
 
 export interface PlanTask {
   id: number;
@@ -248,7 +248,7 @@ export async function runPlan(args: PlanArgs, deps: PlanDeps): Promise<PlanResul
     const r = await deps.chat("plan", messages, { workflow: "plan", config: deps.config, env: deps.env, schema: PLAN_SCHEMA, schemaName: "plan" });
     result = parsePlan(r.text);
     if (result.plan) break;
-    messages.push({ role: "assistant", content: r.text }, { role: "user", content: `That plan is not valid:\n- ${result.errors.join("\n- ")}\nReply with the corrected JSON only.` });
+    messages.push({ role: "assistant", content: r.text }, { role: "user", content: `Plan invalid:\n- ${result.errors.join("\n- ")}\nCorrected JSON only.` });
   }
   if (!result.plan) {
     deps.report(`/plan: no valid plan after ${calls} calls: ${result.errors.join("; ")}`);

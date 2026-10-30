@@ -37,6 +37,9 @@ test("irreversible actions confirm only when not explicitly requested (auto)", a
   await implicit("commit?");
   assert.deepEqual(asked, ["commit?"]);
   assert.equal(confirmFor(ctx(false).c, { kind: "git-init", explicit: false }), undefined, "no UI to ask");
+  const unasked = confirmFor(c, { kind: "commit", explicit: false, fromTool: true })!;
+  assert.equal(await unasked("commit?"), false, "a model's unasked irreversible call is declined");
+  assert.deepEqual(asked, ["commit?"], "with no dialog");
 });
 
 test("routine questions never ask in auto (proceed, or stay absent); dev asks", async () => {

@@ -182,7 +182,7 @@ export async function runEdit(args: EditArgs, deps: EditDeps): Promise<EditResul
         content:
           head +
           fence(shown, viewText(loaded.text, args.instruction, cfg.limits.viewLines)) +
-          `\n\nTask (edit only this file, ${shown}):\n${args.instruction}\n\nReply with edit blocks only.`,
+          `\n\nTask (edit only this file, ${shown}):\n${args.instruction}\n\nEdit blocks only.`,
       },
     ];
     let text = loaded.text;
@@ -203,7 +203,7 @@ export async function runEdit(args: EditArgs, deps: EditDeps): Promise<EditResul
       let problem: string | null = null;
       if (!hit) {
         const why = res.results.filter((x) => !x.ok).map((x) => `${x.path} (${x.reason})`).join(", ");
-        problem = `No edit was applied to ${shown}${why ? `; not applied: ${why}` : "; the reply held no edit block for it"}.`;
+        problem = `No edit was applied to ${shown}${why ? `; not applied: ${why}` : "; reply held no edit block for it"}.`;
       } else {
         const next = readFileSync(target, "utf8");
         if (extra.length) say(`ignored edits to other files: ${extra.join(", ")}`);
@@ -244,7 +244,7 @@ export async function runEdit(args: EditArgs, deps: EditDeps): Promise<EditResul
         if (!hit) say(`attempt 1: ${problem}`);
         msgs.push({
           role: "user",
-          content: `${problem}\n\nReply with corrected edit blocks against ${shown} as it is now:\n${fence(shown, viewText(text, args.instruction, cfg.limits.viewLines))}`,
+          content: `${problem}\n\nCorrected edit blocks against ${shown} now:\n${fence(shown, viewText(text, args.instruction, cfg.limits.viewLines))}`,
         });
       } else {
         await restore();

@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig } from "../../src/config.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
 import { docArgsFromText, parseDocArgs, readmeHeadings, runDoc } from "../../src/workflows/doc.ts";
 import {
-  allowedTokens, badToken, checkSection, chunksOf, codeRelated, codeRuns, diffStat, enforce, extractJson, findReadme, mapProject, mdSections, matchSection, parseLog, partMaps, parseReadmeArgs, readmeLine, readmeSections, runReadme, specifics, FILE_CHARS,
+  allowedTokens, badToken, changesClaim, checkSection, chunksOf, claimIdentifiers, claimSources, validEvidence, codeRelated, codeRuns, diffStat, enforce, extractJson, findReadme, mapProject, mdSections, matchSection, parseLog, partMaps, parseReadmeArgs, readmeLine, readmeSections, runReadme, specifics, FILE_CHARS,
 } from "../../src/workflows/docreadme.ts";
 
 type Json = Record<string, unknown>;
 const ok = (j: Json): string => JSON.stringify(j);
 
 function project(files: Record<string, string>, git = true) {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-readme-"));
+  const d = tmpDir("tinycode-readme-");
   for (const [f, t] of Object.entries(files)) {
     if (t === undefined) continue;
     mkdirSync(join(d, f, ".."), { recursive: true });
@@ -70,7 +70,8 @@ function fake(answer: (kind: string, user: string, n: number) => string | Error)
       : /Section 'How it works'/.test(system) ? "how"
       : /Section 'Data'/.test(system) ? "data"
       : /Section 'Project layout'/.test(system) ? "layout"
-      : /check one section of a project's README/.test(system) ? "update" : "?";
+      : /check one section of a project's README/.test(system) ? "update"
+      : /README sentence is about to be changed/.test(system) ? "claim" : "?";
     rec.push({ step, system, user, schemaName: opts?.schemaName });
     counts[kind] = (counts[kind] ?? 0) + 1;
     names[opts?.schemaName ?? "?"] = (names[opts?.schemaName ?? "?"] ?? 0) + 1;
@@ -105,6 +106,7 @@ function standard(kind: string, user: string): string | Error {
       return ok({ rows: names.map((n) => ({ name: n, does: "Part of the application." })) });
     }
     case "check": return ok({ unsupported: [] });
+    case "claim": return ok({ verdict: "new_correct", evidence: user.match(/^(\S+:\d+):/m)?.[1] ?? "none:0" });
     default: return new Error("unexpected call " + kind);
   }
 }
@@ -563,4 +565,64 @@ test("S19 a section whose call fails gets one retry, then shows as \"not checked
   assert.ok(lines.some((l) => l.startsWith("  ? not checked: License")), lines.join("\n"));
   assert.ok(lines.some((l) => /^not checked \(1\): License/.test(l)));
   assert.equal(readFileSync(join(cwd, "README.md"), "utf8"), before);
+});
+
+// ---------------------------------------------------------------- claim check before a section edit is applied
+
+const WAKE = {
+  "wake.py": "def wake():\n    return stub()\n\ndef stub():\n    start_real_app()\n    return 'waking'\n\ndef start_real_app():\n    pass\n",
+  "README.md": "# App\n\n## What it is\n\nThe wake stub answers the first request and starts the real app on your first request.\n\n## License\n\nMIT\n",
+};
+const wakeEdit = { search: " and starts the real app on your first request", replace: "" };
+
+test("a section edit that removes a true claim is kept out: old_correct from the check call, file untouched, reported", async () => {
+  const { cwd, env } = project(WAKE);
+  const before = readFileSync(join(cwd, "README.md"), "utf8");
+  let claimUser = "";
+  const f = fake((kind, user) => {
+    if (kind === "update") return ok({ verdict: "revise", reason: "the stub does not start the app", edits: [wakeEdit] });
+    if (kind === "claim") return (claimUser = user, ok({ verdict: "old_correct", evidence: "wake.py:5" }));
+    return standard(kind, user);
+  });
+  const { r, lines } = await run(cwd, env, f.chat, 'readme --update "What it is"');
+  assert.equal(f.counts.claim, 1);
+  assert.deepEqual(r.updated, []);
+  assert.equal(readFileSync(join(cwd, "README.md"), "utf8"), before);
+  assert.ok(r.flagged.some((x) => /^kept: the code supports the original/.test(x)), r.flagged.join("\n"));
+  assert.ok(lines.some((l) => /= kept: What it is \(kept: the code supports the original\)/.test(l)));
+  // the check call saw the old sentence, the new (empty) one and numbered source lines of the file the claim is about
+  assert.match(claimUser, /Old sentence: and starts the real app on your first request/);
+  assert.match(claimUser, /wake\.py:5: {1,}start_real_app\(\)/);
+});
+
+test("a section edit is applied only on new_correct with an evidence line that was shown; unclear and made-up lines keep the old text", async () => {
+  const run1 = async (answer: Json) => {
+    const { cwd, env } = project(WAKE);
+    const f = fake((kind, user) => (kind === "update" ? ok({ verdict: "revise", reason: "r", edits: [{ search: wakeEdit.search, replace: " and answers with a waking note" }] }) : kind === "claim" ? ok(answer) : standard(kind, user)));
+    const { r } = await run(cwd, env, f.chat, 'readme --update "What it is"');
+    return { r, text: readFileSync(join(cwd, "README.md"), "utf8") };
+  };
+  const good = await run1({ verdict: "new_correct", evidence: "wake.py:4" });
+  assert.deepEqual(good.r.updated, ["What it is"]);
+  assert.ok(good.text.includes("waking note") && !good.text.includes("starts the real app"));
+  for (const bad of [{ verdict: "unclear", evidence: "wake.py:4" }, { verdict: "new_correct", evidence: "nowhere.py:1" }, { verdict: "new_correct", evidence: "wake.py:999" }, { verdict: "new_correct", evidence: "" }]) {
+    const x = await run1(bad);
+    assert.deepEqual(x.r.updated, [], JSON.stringify(bad));
+    assert.ok(x.text.includes("starts the real app on your first request"), JSON.stringify(bad));
+  }
+});
+
+test("claim helpers: pure additions are not checked; identifiers, file lines and evidence validation", () => {
+  assert.equal(changesClaim("It runs.", "It runs. It is fast."), false);
+  assert.equal(changesClaim("It runs fast.", "It runs slowly."), true);
+  assert.equal(changesClaim("and starts the app", ""), true);
+  assert.deepEqual(claimIdentifiers("`image_processor.py` calls resizeAll and embed_text; see README.md").sort(), ["README.md", "embed_text", "image_processor", "image_processor.py", "resizeAll"]);
+  const { cwd } = project({ "image_processor.py": "def resize_all(x):\n    return x\n", "embedder.py": "def embed_text(t):\n    return t\n" });
+  const src = claimSources(mapProject(cwd), "image_processor.py resizes images", "embedder.py embeds text", [], 20);
+  assert.match(src.text, /^image_processor\.py:1: def resize_all/m);
+  assert.match(src.text, /^embedder\.py:1: def embed_text/m);
+  assert.equal(validEvidence("embedder.py:1", src.shown), "embedder.py:1");
+  assert.equal(validEvidence("embedder.py:1-2", src.shown), "embedder.py:1");
+  assert.equal(validEvidence("embedder.py:7", src.shown), null);
+  assert.equal(validEvidence("other.py:1", src.shown), null);
 });

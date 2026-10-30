@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig } from "../../src/config.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
 import { loadPlan, orchestratorContext, parseBuildArgs, runBuild, testFileFor, type BuildPlan } from "../../src/workflows/build.ts";
@@ -11,7 +11,7 @@ import type { PiHandoff } from "../../src/workflows/fix.ts";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const PY = (process.env.TINYCODE_TEST_PYTHON ?? "python3");
-const cfg = () => mergeConfig({ test: { python: PY } });
+const cfg = () => mergeConfig({ test: { python: PY }, ladder: { skipSolePick: false, rung2: true } }); // the scripted replies include the pick and the rung-2 review
 
 const block = (path: string, body: string) => `${path}\n<<<<<<< SEARCH\n=======\n${body}\n>>>>>>> REPLACE`;
 const edit = (path: string, search: string, replace: string) => `${path}\n<<<<<<< SEARCH\n${search}\n=======\n${replace}\n>>>>>>> REPLACE`;
@@ -27,7 +27,7 @@ const T3 = block("tests/test_mul.py", "from calc import mul\n\ndef test_mul():\n
 const C3 = edit("calc.py", "def add(a, b):\n    return a + b", "def add(a, b):\n    return a + b\n\ndef mul(a, b):\n    return a * b");
 
 function project(): { cwd: string; env: Record<string, string> } {
-  const dir = mkdtempSync(join(tmpdir(), "tinycode-build-"));
+  const dir = tmpDir("tinycode-build-");
   const cwd = join(dir, "proj");
   mkdirSync(join(cwd, ".tinycode"), { recursive: true });
   const task = (id: number, title: string, test: string) => ({ id, title, files: ["calc.py"], test, done: false });
@@ -139,7 +139,7 @@ test("rung 3 passing marks the task done with solved_by pi (a passing rung 3 is 
 
 test("no plan: a message, no calls; no git and no confirm: no commits unless --yes", async () => {
   const lines: string[] = [];
-  const empty = mkdtempSync(join(tmpdir(), "tinycode-build-"));
+  const empty = tmpDir("tinycode-build-");
   const r = await runBuild({ yes: false }, { cwd: empty, config: cfg(), chat: async () => { throw new Error("no call"); }, report: (l) => lines.push(l) });
   assert.match(lines[0], /no \.tinycode\/plan\.json/);
   assert.equal(r.total, 0);
@@ -185,7 +185,7 @@ test("a task whose listed file is never created is blocked, not committed", asyn
 
 test("read-only files may stay unchanged; an unchanged non-read-only file fails the task", async () => {
   const { fileProblems } = await import("../../src/workflows/build.ts");
-  const d = mkdtempSync(join(tmpdir(), "tinycode-fp-"));
+  const d = tmpDir("tinycode-fp-");
   writeFileSync(join(d, "a.py"), "x");
   writeFileSync(join(d, "b.py"), "y");
   const t = { id: 1, title: "t", files: ["a.py", "b.py (read-only)", "c.py"], test: "t", done: false };

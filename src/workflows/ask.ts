@@ -7,9 +7,9 @@ import type { Config } from "../config.ts";
 import type { Message } from "../llm.ts";
 import type { ChatFn } from "./fix.ts";
 
-export const ASK_RULES = `You answer a developer's general programming question. You have no access to their code, files or tools.
-Answer from general knowledge in plain text, short and direct: the answer first, then at most one small example if it helps.
-If the question needs their code to be answered, say so in one sentence and name what you would need. Do not invent file names or APIs.`;
+export const ASK_RULES = `Answer a general programming question. No access to their code, files, tools.
+General knowledge, plain text, short: answer first, then at most one small example.
+Needs their code: say so in one sentence, name what you need. No invented file names or APIs.`;
 
 export interface AskArgs {
   question: string;

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { ANSWER_SCHEMA, BRANCH_SYSTEM, branchMessages, findAnswer, formatAnswer } from "../../src/branch.ts";
 import { DEFAULTS } from "../../src/config.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
@@ -17,7 +17,7 @@ test("formatAnswer: json answer + citations; plain text and empty fall back", ()
 });
 
 test("find: evidence goes to one 'branch' call with the answer schema; only the answer comes back", async () => {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-branch-"));
+  const d = tmpDir("tinycode-branch-");
   mkdirSync(join(d, "uploader"));
   writeFileSync(join(d, "uploader/limits.py"), "MAX_UPLOAD_MB = 5\n\ndef check(size):\n    return size <= MAX_UPLOAD_MB\n");
   const calls: { step: string; messages: Message[]; schema?: object }[] = [];

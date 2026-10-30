@@ -17,7 +17,7 @@ export interface ProgressSink {
   /** checklist lines above the editor; undefined clears them */
   widget(lines: string[] | undefined): void;
   /** the end summary: a chat-visible message in the TUI, stdout in -p mode */
-  message(text: string): void;
+  message(text: string, kind?: "beat"): void;
   /** a progress line for a terminal without a UI (stderr) */
   err(line: string): void;
   /** true in the TUI: the status line and widget carry progress; false: progress lines go to `err` */
@@ -29,6 +29,9 @@ export interface ProgressSink {
   /** the operator said stop */
   onStop?(): void;
 }
+
+/** customType of the heartbeat and stuck lines: for the human only, never in the model's context (src/orchestrate.ts `dropDisplayOnly`) */
+export const CUSTOM_BEAT = "tinycode-beat";
 
 export interface Summary {
   outcome?: "done" | "blocked" | "failed";
@@ -194,7 +197,7 @@ export class Progress {
             .catch(() => {});
         } else {
           // auto mode: no question, one plain sentence in the chat (a terminal without a UI gets it on stderr)
-          if (s.interactive) s.message(stuckSentence(c.since));
+          if (s.interactive) s.message(stuckSentence(c.since), "beat");
           else s.err(`tinyCode · ${c.o.workflow} · ${stuckSentence(c.since)}`);
         }
       }
@@ -438,7 +441,7 @@ export class Progress {
     if (!idle) line = this.heartbeatLine();
     if (!line) return;
     const s = c.o.sink;
-    if (s.interactive) s.message(line);
+    if (s.interactive) s.message(line, "beat");
     else s.err(line);
   }
 
@@ -458,8 +461,8 @@ export class Progress {
 
   // ------------------------------------------------------------ the end
 
-  /** The end summary: outcome, what changed, calls, tokens (cached %), time, next step. */
-  summary(s: Summary | string = {}): string {
+  /** The end summary: outcome, what changed, calls, tokens (cached %), time, next step. `brief` (the text a model reads) leaves out calls, tokens and time. */
+  summary(s: Summary | string = {}, brief = false): string {
     const c = this.core;
     const o = typeof s === "string" ? { text: s } : s;
     const outcome = o.outcome ?? "done";
@@ -470,9 +473,7 @@ export class Progress {
     const body = [
       o.reason ?? o.text ?? "",
       shown && !(o.text ?? "").includes(files[0] ?? "\u0000") ? `changed ${shown}` : "",
-      `${c.calls} call${c.calls === 1 ? "" : "s"}`,
-      `${fmtTok(tok)} tokens${cache}`,
-      fmtTime(c.now() - c.start),
+      ...(brief ? [] : [`${c.calls} call${c.calls === 1 ? "" : "s"}`, `${fmtTok(tok)} tokens${cache}`, fmtTime(c.now() - c.start)]),
     ].filter(Boolean);
     return `${c.o.workflow} ${outcome}: ${body.join(", ")}` + (o.next ? `\nNext: ${o.next}` : "");
   }

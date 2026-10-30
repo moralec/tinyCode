@@ -19,7 +19,7 @@ import { execShell, lintPass, type ExecFn, type LintOptions } from "../lint.ts";
 import type { Message } from "../llm.ts";
 import { applyBlocks } from "../protocol/apply.ts";
 import { parseBlocks } from "../protocol/blocks.ts";
-import { EDIT_RULES } from "../protocol/prompts.ts";
+import { EDIT_RULES, TESTS_RULE } from "../protocol/prompts.ts";
 import { runTests as realRunTests, testCommand, type TestRun } from "../testrun.ts";
 import { isTestPath } from "./add.ts";
 import { isCachePath } from "./cachefiles.ts";
@@ -30,14 +30,13 @@ import type { ChatFn } from "./fix.ts";
 export type Framework = "pytest" | "unittest" | "node:test" | "jest" | "vitest";
 
 export const TEST_RULES =
-  EDIT_RULES.replace("Never edit the test you were given; add new tests only when the task asks for them.", "") +
-  "\n\nYou are writing tests for code that already exists. Edit test files only: never change the code under test. " +
-  "Assert the INTENDED behaviour (from the request, the function's name, its docstring and its callers), not " +
-  "whatever the code returns today: if the code seems to do something odd (repeated separators, an empty result, an " +
-  "off-by-one), assert what it should do, even if the test then fails. Cover normal cases, edge cases, bad input. Use the test framework named in the task and the style of the existing tests. " +
-  "For a new test file use an empty SEARCH; for an existing test file add after its last test with an anchor of a few " +
-  "existing lines repeated in REPLACE, and never change or remove an existing test. Never weaken an assertion " +
-  "to make a test pass.";
+  EDIT_RULES.replace(TESTS_RULE, "") +
+  "\n\nWrite tests for existing code. Edit test files only: never the code under test. Assert INTENDED behaviour " +
+  "(from request, function name, docstring, callers), not what the code returns today: odd behaviour (repeated " +
+  "separators, empty result, off-by-one): assert what it should do, even if the test fails. Cover normal cases, edge " +
+  "cases, bad input. Use the framework named in the task and the style of existing tests. New test file: empty SEARCH; " +
+  "existing test file: add after its last test with an anchor of a few existing lines repeated in REPLACE; never change " +
+  "or remove an existing test. Never weaken an assertion to pass.";
 
 export interface TestGenArgs {
   /** the code under test (else found from the task) */
@@ -46,6 +45,8 @@ export interface TestGenArgs {
   test?: string;
   /** the tests must fail on the current code */
   expectFail: boolean;
+  /** put the tests in a new file of their own (`..._repro`), so only they run: used for /fix's reproduction */
+  fresh?: boolean;
   task: string;
 }
 
@@ -177,6 +178,12 @@ const OWN =
 /** Own reasons (the test is broken) or a behaviour mismatch (the test ran and the code did something else). */
 export function classifyFailure(text: string): FailKind {
   return OWN.test(text) ? "own" : "mismatch";
+}
+
+/** A file of its own beside where the target's tests would go: `tests/test_x_repro.py`, `x.repro.test.ts`. */
+export function reproTestPath(target: string): string {
+  const p = newTestPath(target);
+  return isPy(target) ? p.replace(/\.py$/, "_repro.py") : p.replace(/\.test(\.\w+)$/, ".repro.test$1");
 }
 
 /** Names on `FAILED`/`ERROR` lines of trimmed pytest output. */
@@ -348,7 +355,7 @@ export async function runTestGen(args: TestGenArgs, deps: TestGenDeps): Promise<
     return res(false, "no-target", target.file, null, null);
   }
   const existing = existingTests(cwd, target.file);
-  const testFile = args.test ? normpath(args.test) : (existing[0] ?? newTestPath(target.file));
+  const testFile = args.test ? normpath(args.test) : args.fresh ? reproTestPath(target.file) : (existing[0] ?? newTestPath(target.file));
   const isNew = readText(cwd, testFile) === null;
   say(`target: ${target.file}${target.line ? `:${target.line}` : ""}${target.symbol ? ` (${target.symbol})` : ""}; framework: ${fw.name} (${fw.why}); tests: ${testFile}${isNew ? " (new file)" : ""}`);
   const command = frameworkCommand(fw.name, cfg.test, testFile);
@@ -390,13 +397,13 @@ export async function runTestGen(args: TestGenArgs, deps: TestGenDeps): Promise<
   for (const e of existing.filter((x) => x !== testFile).slice(0, 1)) parts.push(`Another test file for style, ${e}:\n\`\`\`\n${viewText(readText(cwd, e) ?? "", task, cfg.limits.viewLines)}\`\`\``);
   const rel = posix.relative(posix.dirname(testFile), target.file);
   const mode = args.expectFail
-    ? "The task describes behaviour the code does not have yet: write tests that assert that behaviour; they are expected to fail on the current code."
-    : "Assert the intended behaviour; if the code does something else the test fails and that is reported as a possible bug, never weakened.";
+    ? "Task describes behaviour the code lacks: assert that behaviour; tests are expected to fail on current code."
+    : "Assert intended behaviour; if the code differs the test fails, reported as possible bug, never weakened.";
   const instruction =
-    `Task: ${task}\nTest framework: ${fw.name}. Write the tests in ${testFile}${isNew ? " (a new file)" : " (it exists; add to it)"}. ` +
-    `The code under test is ${target.file}${isJs(target.file) ? ` (import it from ${rel.startsWith(".") ? rel : "./" + rel})` : ""}. ${mode}\n\n` +
-    "First write the line `Intended behaviour:` and, under it, 2 to 6 plain statements (each starting with `- `) of what the code should do, derived from the request, the function's name, its docstring and its callers (not from what the code does today). " +
-    "Then the edit blocks. Your tests must encode those statements.";
+    `Task: ${task}\nTest framework: ${fw.name}. Write tests in ${testFile}${isNew ? " (new file)" : " (exists; add to it)"}. ` +
+    `Code under test: ${target.file}${isJs(target.file) ? ` (import it from ${rel.startsWith(".") ? rel : "./" + rel})` : ""}. ${mode}\n\n` +
+    "First line `Intended behaviour:`, under it 2-6 plain statements (each starting `- `) of what the code should do, from the request, function name, docstring, callers (not from what the code does today). " +
+    "Then edit blocks. Tests must encode those statements.";
 
   /** Apply a reply under the test-files-only rules; returns the test paths written. */
   const applyGuarded = async (reply: string): Promise<string[]> => {
@@ -457,7 +464,7 @@ export async function runTestGen(args: TestGenArgs, deps: TestGenDeps): Promise<
     const cur = readText(cwd, testFile) ?? "";
     const reply = await call(
       `${g.text}\n\nCurrent ${testFile}:\n\`\`\`\n${viewText(cur, task, cfg.limits.viewLines)}\`\`\`\n\nRunning it gave:\n${t.text}\n\n` +
-        `The test file itself is broken (import, fixture or syntax). Fix only ${testFile}. Do not change the code under test and do not change what an assertion expects.\n\nReply with edit blocks only.`,
+        `Test file itself is broken (import, fixture or syntax). Fix only ${testFile}. Not the code under test; not what an assertion expects.\n\nEdit blocks only.`,
     );
     applied = await applyGuarded(reply);
     say(`retry applied: ${JSON.stringify(applied)}`);

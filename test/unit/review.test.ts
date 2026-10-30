@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig } from "../../src/config.ts";
 import { parseDiff } from "../../src/context/diff.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
-import { mergeFindings, parseFindings, parseReviewArgs, runReview, selectHunks } from "../../src/workflows/review.ts";
+import { CUT_RETRY, mergeFindings, parseFindings, parseReviewArgs, readFindings, runReview, selectHunks } from "../../src/workflows/review.ts";
 
 const DIFF = `diff --git a/orders/dates.py b/orders/dates.py
 --- a/orders/dates.py
@@ -57,7 +57,7 @@ test("runReview: 3 hunk calls (lockfile skipped), merged findings match the fixt
     calls.push({ step, messages, schema: opts?.schema });
     return replies[i++]!;
   };
-  const env = { TINYCODE_LOG: join(mkdtempSync(join(tmpdir(), "tc-review-")), "calls.jsonl") };
+  const env = { TINYCODE_LOG: join(tmpDir("tc-review-"), "calls.jsonl") };
   const out: string[] = [];
   const r = await runReview(parseReviewArgs(""), {
     cwd: ".", config: mergeConfig({}), chat, report: (l) => out.push(l), env, hunks: parseDiff(DIFF),
@@ -90,4 +90,41 @@ test("parseFindings and mergeFindings: junk tolerated, severity order, no findin
   const h = parseDiff(DIFF)[0]!;
   const m = mergeFindings([{ hunk: h, raw: [{ line: 10, severity: "low", issue: "b", fix: "" }, { line: 11, severity: "high", issue: "a", fix: "" }] }]);
   assert.deepEqual(m.map((f) => f.severity), ["high", "low"]);
+});
+
+test("a cut hunk reply is retried once asking for 1 finding; cut again it is reported unread, never as no findings", async () => {
+  const hunks = parseDiff(DIFF).slice(0, 2);
+  const cut = (text: string): ChatResult => ({ ...reply({}), text, finish: "length" });
+  const seen: { content: string; max?: number }[] = [];
+  const run = async (replies: ChatResult[]) => {
+    let i = 0;
+    seen.length = 0;
+    const chat = async (_s: string, messages: Message[], opts?: { maxTokens?: number }) => {
+      seen.push({ content: String(messages[1]!.content), max: opts?.maxTokens });
+      return replies[i++]!;
+    };
+    const out: string[] = [];
+    const r = await runReview(parseReviewArgs(""), { cwd: ".", config: mergeConfig({}), chat, report: (l) => out.push(l), env: { TINYCODE_LOG: join(tmpDir("tc-review-cut-"), "calls.jsonl") }, hunks, readFile: () => "x\n" });
+    return { r, out };
+  };
+  // review-1-money r3: cut at the cap with the bugs in the cut part -> the retry finds them
+  const a = await run([cut('{"findings":[{"line":11,"severity":"high","issue":"%d is the day'), reply({ findings: [{ line: 11, severity: "high", issue: "%d is the day, not the month", fix: "%m" }] }), reply({ findings: [] })]);
+  assert.equal(a.r.calls, 3);
+  assert.ok(seen[1]!.content.endsWith(`\n${CUT_RETRY}`) && !seen[0]!.content.includes(CUT_RETRY) && !seen[2]!.content.includes(CUT_RETRY));
+  assert.equal(a.r.findings.length, 1);
+  assert.equal(a.r.unread, 0);
+  // cut twice: unread, and the result does not say "no findings"
+  const b = await run([cut("{"), cut('{"findings":['), reply({ findings: [] })]);
+  assert.equal(b.r.unread, 1);
+  assert.ok(b.out.some((l) => /orders\/dates\.py @@ .*: reply cut, hunk not reviewed/.test(l)), b.out.join("\n"));
+  assert.ok(!b.out.includes("no findings") && b.out.includes("no findings in the hunks read"));
+  // not the expected JSON (no findings array, then prose) is unread too, even with finish stop
+  const c = await run([reply({}), { ...reply({}), text: "Looks fine to me." }, reply({ findings: [] })]);
+  assert.equal(c.r.unread, 1);
+  assert.equal(readFindings('{"findings":[{"line":1'), null);
+  assert.deepEqual(readFindings('{"findings":[]}'), []);
+});
+
+test("hunk replies get 600 tokens by default", () => {
+  assert.equal(mergeConfig({}).limits.maxTokens.hunk, 600);
 });

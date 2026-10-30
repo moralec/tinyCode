@@ -21,11 +21,13 @@ export function normalizeEol(text: string): string {
   return text.replace(/\r\n/g, "\n");
 }
 
-/** tc0: path.strip().strip("`*# ").replace("\\", "/") */
+/** tc0: path.strip().strip("`*# ").replace("\\", "/"); also a leading "File:" / "Path:" (a model echoing the prompt's "File: x.py" line, doc-2-todo) */
 export function cleanPath(raw: string): string {
   return raw
     .trim()
     .replace(/^[`*# ]+|[`*# ]+$/g, "")
+    .replace(/^(?:file|path)\s*:\s*/i, "")
+    .replace(/^[`*# ]+/, "")
     .replace(/\\/g, "/");
 }
 

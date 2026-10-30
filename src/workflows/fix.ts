@@ -21,7 +21,8 @@ import { SESSION } from "../llm.ts";
 import { logPath } from "../log.ts";
 import { applyReply, type ApplyResult } from "../protocol/apply.ts";
 import { SYSTEM } from "../protocol/prompts.ts";
-import { runTests, type TestRun } from "../testrun.ts";
+import { failingNames, failureBlocks, firstErrorLine, parseCounts, runTests, type TestCounts, type TestRun } from "../testrun.ts";
+import { runTestGen } from "./testgen.ts";
 
 export const PICK_SCHEMA = {
   type: "object",
@@ -41,8 +42,9 @@ export const REVIEW_SCHEMA = {
   required: ["diagnosis", "where", "next_step"],
 };
 export const REVIEW_SYSTEM =
-  "A code change was tried and the test still fails. From the test output, the diff and the search hits, say why " +
-  "it failed and what to do differently. Be short and concrete; cite path:line.";
+  "Code change tried; test still fails. See test output, failing assertions, current files. Files shown are complete " +
+  "current code. Say why fail, name exact path:line to change. Never call code incomplete when file shown. " +
+  "Text ending \"[file cut here\" or \"[diff cut here\" cut for length; files on disk are complete. Short, concrete.";
 
 export type SolvedBy = "rung1" | "rung2" | "pi" | "none";
 
@@ -50,6 +52,8 @@ export type ChatFn = (step: string, messages: Message[], opts?: ChatOptions) => 
 
 export interface FixArgs {
   test?: string;
+  /** a bug description with no failing test: write a reproduction first (default true; /add and /edit hand-overs set false) */
+  reproduce?: boolean;
   undo: boolean;
   task: string;
 }
@@ -85,10 +89,22 @@ const MAX_SNAPSHOT_FILE = 2_000_000;
 const MAX_SNAPSHOT_TOTAL = 50_000_000;
 
 /** Where the pre-ladder copy of the tree lives (outside the repo, one per working directory). */
-export function undoDir(cwd: string, env: Env = process.env): string {
+export function undoDir(cwd: string, env: Env = process.env, slot = ""): string {
   const id = createHash("sha1").update(resolve(cwd)).digest("hex").slice(0, 12);
-  return join(dirname(logPath(env)), "undo", id);
+  return join(dirname(logPath(env)), "undo", id + slot);
 }
+
+const SOURCE_EXT = /\.(py|js|ts|sh)$/;
+const TEST_FILE = /(^|\/)(tests?|__tests__)\/|(^|\/)test_[^/]*$|[._](test|spec)\.[a-z]+$|_test\.[a-z]+$|(^|\/)conftest\.py$/i;
+
+/** The one non-test source file of the tree (repoFiles), or null when there are none or several. */
+export function soleSource(cwd: string, test?: string | null): string | null {
+  const src = repoFiles(cwd).filter((f) => SOURCE_EXT.test(f) && f !== test && !TEST_FILE.test(f) && !/(^|\/)__init__\.py$/.test(f));
+  return src.length === 1 ? src[0]! : null;
+}
+
+/** The ladder's second snapshot: the best tree its rungs produced (see `better`). Never what `/fix --undo` restores. */
+const BEST_SLOT = ".best";
 
 interface Manifest {
   cwd: string;
@@ -98,8 +114,8 @@ interface Manifest {
 }
 
 /** Copy every text file of the tree (repoFiles) to the undo dir. Replaces any earlier snapshot of this cwd. */
-export function takeSnapshot(cwd: string, env: Env = process.env): Manifest {
-  const dir = undoDir(cwd, env);
+export function takeSnapshot(cwd: string, env: Env = process.env, slot = ""): Manifest {
+  const dir = undoDir(cwd, env, slot);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(join(dir, "files"), { recursive: true });
   const files: string[] = [];
@@ -124,9 +140,9 @@ export function takeSnapshot(cwd: string, env: Env = process.env): Manifest {
   return manifest;
 }
 
-function readManifest(cwd: string, env: Env): Manifest | null {
+function readManifest(cwd: string, env: Env, slot = ""): Manifest | null {
   try {
-    return JSON.parse(readFileSync(join(undoDir(cwd, env), "manifest.json"), "utf8")) as Manifest;
+    return JSON.parse(readFileSync(join(undoDir(cwd, env, slot), "manifest.json"), "utf8")) as Manifest;
   } catch {
     return null;
   }
@@ -153,10 +169,10 @@ export interface RestoreResult {
 }
 
 /** Put the tree back as the snapshot saw it: changed files rewritten, files created since removed. null = no snapshot. */
-export function restoreSnapshot(cwd: string, env: Env = process.env): RestoreResult | null {
-  const m = readManifest(cwd, env);
+export function restoreSnapshot(cwd: string, env: Env = process.env, slot = ""): RestoreResult | null {
+  const m = readManifest(cwd, env, slot);
   if (!m) return null;
-  const dir = join(undoDir(cwd, env), "files");
+  const dir = join(undoDir(cwd, env, slot), "files");
   const restored: string[] = [];
   const removed: string[] = [];
   for (const f of m.files) {
@@ -295,15 +311,43 @@ function formatFailed(res: ApplyResult): string {
 
 // ---------------------------------------------------------------- the ladder
 
+/**
+ * `a` is a strictly better test result than `b`: more tests pass, or as many pass and fewer fail with no test lost
+ * (a tree that no longer imports reports 1 error out of 1, which is not better than 10 failing out of 10).
+ */
+export const better = (a: TestCounts, b: TestCounts): boolean =>
+  a.passed > b.passed || (a.passed === b.passed && a.failed < b.failed && a.passed + a.failed >= b.passed + b.failed);
+
+/**
+ * What the model is told, once, when the ladder's best tree is kept: the counts, the still-failing tests (at most
+ * `maxNames`), the first error line and the rule. Never the reviewer's prose: it describes an earlier tree.
+ */
+export function keptText(rung: number, now: TestCounts, lastText: string, maxNames = 8): string {
+  const { names, total } = failingNames(lastText, maxNames);
+  const more = Math.max(now.failed, total) - names.length;
+  const err = firstErrorLine(lastText);
+  return (
+    `Kept rung ${rung} tree: ${now.passed}/${now.passed + now.failed} pass.` +
+    (names.length ? ` Still fail: ${names.join(", ")}${more > 0 ? ` (+${more} more)` : ""}.` : "") +
+    (err ? ` First error: ${err.replace(/[.\s]+$/, "")}.` : "") +
+    " Edit only what fails. No rewrite."
+  );
+}
+
+/** Starts the reviewer's part of a rung-3 hand-over text; `handoverText` finds the part to pass back by it. */
+export const HANDOVER_MARK = "Reviewer diagnosis of last attempt:";
+
 export interface PiHandoff {
   /** the first user message for Pi's loop */
   text: string;
   /** turn cap for this run (`ladder.loopTurnCap`) */
   turnCap: number;
+  /** test counts of the tree the loop starts from (the ladder's kept tree, else the original); the loop's starting best */
+  tree?: TestCounts | null;
 }
 
 /** The phases /fix reports, in order. */
-export const FIX_PHASES = ["pick files", "edit", "review", "second edit", "loop"];
+export const FIX_PHASES = ["reproduce", "pick files", "edit", "review", "second edit", "loop"];
 
 export interface FixDeps {
   /** progress display (src/progress.ts); absent = none */
@@ -332,18 +376,47 @@ export interface FixResult {
   direct: number;
   piTurns: number;
   diagnosis: string | null;
+  /** set when the described behaviour already works: the reproduction test (path and text) that passed; it was undone and nothing ran after it */
+  notReproduced?: { test: string; text: string };
+  /** the reproduction test the ladder ran with (the described bug was reproduced) */
+  reproTest?: string;
   /** the text handed to Pi, when rung 3 ran */
   handoff: string | null;
+  /** when the ladder's best tree was kept for rung 3 instead of the original: what the model is told (else null) */
+  kept?: string | null;
   lines: string[];
 }
 
-export function formatReview(text: string): string {
+/** A JSON string body (possibly cut off before its closing quote) as text. */
+function jsonString(body: string): string {
   try {
-    const j = JSON.parse(text) as { diagnosis?: string; where?: string[]; next_step?: string };
-    return `Diagnosis: ${j.diagnosis ?? ""}\nWhere: ${(j.where ?? []).join(", ")}\nNext step: ${j.next_step ?? ""}`;
+    return JSON.parse(`"${body}"`) as string;
   } catch {
-    return text.slice(0, 800);
+    return body.replace(/\\n/g, " ").replace(/\\(.)/g, "$1");
   }
+}
+
+/** The review as text for the model: `Diagnosis / Where / Next step`. Tolerates JSON cut off by the token limit. */
+export function formatReview(text: string): string {
+  const show = (d: string, w: string[], n: string) => `Diagnosis: ${d}\nWhere: ${w.join(", ")}\nNext step: ${n}`;
+  try {
+    const j = JSON.parse(text) as { diagnosis?: string; where?: string[]; next_step?: string } | null;
+    if (j && typeof j === "object" && !Array.isArray(j)) return show(j.diagnosis ?? "", j.where ?? [], j.next_step ?? "");
+  } catch {
+    // partial JSON or plain prose: pull out what is there
+  }
+  const field = (k: string): string | null => {
+    const m = text.match(new RegExp(`"${k}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`));
+    return m ? jsonString(m[1]).trim() : null;
+  };
+  const diagnosis = field("diagnosis");
+  const nextStep = field("next_step");
+  const wm = text.match(/"where"\s*:\s*\[([^\]]*)/);
+  const where = wm ? [...wm[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((x) => jsonString(x[1])) : [];
+  if (diagnosis || nextStep || where.length) return show(diagnosis ?? "", where, nextStep ?? "");
+  const whole = text.replace(/\s+/g, " ").trim();
+  const flat = whole.length > 800 ? `${whole.slice(0, 800)} [review text cut here at 800 chars]` : whole;
+  return /[A-Za-z0-9]{2}/.test(flat) ? flat : "(the review was cut off before it said anything)";
 }
 
 export function trunkModel(cfg: Config): string {
@@ -361,7 +434,59 @@ function logReply(env: Env, rec: Record<string, unknown>): void {
   }
 }
 
+/**
+ * With a bug description and no failing test, first write a minimal reproduction from the description (as /test does:
+ * test files only, expected to fail on the current code) and run it. It fails: the ladder continues with that test.
+ * It passes: "couldn't reproduce", the test is shown and undone, and the run stops. Anything else (no target found,
+ * no test routine, the test would not run): the ladder runs as it always did, without a test.
+ */
+async function reproduceFirst(args: FixArgs, deps: FixDeps): Promise<{ args: FixArgs; stop?: FixResult; calls: number; lines: string[] }> {
+  const env = deps.env ?? process.env;
+  const lines: string[] = [];
+  const say = (l: string) => {
+    lines.push(l);
+    deps.report(l);
+  };
+  deps.progress?.step("reproduce");
+  takeSnapshot(deps.cwd, env); // undone if the test passes; runLadder keeps it as the `/fix --undo` copy
+  const r = await runTestGen(
+    { expectFail: true, fresh: true, task: `a test that reproduces this bug (it must fail while the bug is there): ${args.task}` },
+    { cwd: deps.cwd, config: deps.config, chat: deps.chat, report: say, env, runTests: deps.runTests, lint: deps.lint },
+  );
+  if (r.outcome === "unexpected-pass" && r.testFile) {
+    const text = readFileSync(join(deps.cwd, r.testFile), "utf8");
+    const allLines = text.split("\n");
+    const shown = (allLines.length > 40 ? `[first ${allLines.length - 40} lines of the test not shown for length]\n` : "") + allLines.slice(-40).join("\n");
+    restoreSnapshot(deps.cwd, env);
+    say(`couldn't reproduce: the described behaviour already works (test: ${r.testFile})`);
+    say(`the test that passed (undone):\n${shown}`);
+    const stop: FixResult = { solvedBy: "none", calls: r.calls, direct: r.calls, piTurns: 0, diagnosis: null, notReproduced: { test: r.testFile, text: shown }, handoff: null, lines };
+    return { args, stop, calls: r.calls, lines };
+  }
+  if (r.outcome === "expected-fail" && r.testFile) {
+    say(`reproduced: the new test ${r.testFile} fails on the current code; the ladder continues with it`);
+    return { args: { ...args, test: r.testFile }, calls: r.calls, lines };
+  }
+  restoreSnapshot(deps.cwd, env);
+  say(`no reproduction test could be made (${r.outcome}); the ladder runs without one`);
+  return { args, calls: r.calls, lines };
+}
+
 export async function runFix(args: FixArgs, deps: FixDeps): Promise<FixResult> {
+  let repro: { calls: number; lines: string[] } | null = null;
+  if (!args.test && !args.undo && args.reproduce !== false && args.task && !deps.keepUndo) {
+    const r = await reproduceFirst(args, deps);
+    if (r.stop) return r.stop;
+    repro = r;
+    args = r.args;
+    deps = { ...deps, keepUndo: true }; // the snapshot taken before the reproduction test is what /fix --undo restores
+  }
+  const out = await runFixInner(args, deps);
+  if (!repro) return out;
+  return { ...out, calls: out.calls + repro.calls, direct: out.direct + repro.calls, reproTest: args.test, lines: [...repro.lines, ...out.lines] };
+}
+
+async function runFixInner(args: FixArgs, deps: FixDeps): Promise<FixResult> {
   if (!deps.keepUndo) return runLadder(args, deps);
   // Keep the earliest snapshot per run (S18): set the caller's aside, let the ladder snapshot as usual, put it back.
   const env = deps.env ?? process.env;
@@ -414,7 +539,22 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
     });
     return r.text;
   };
-  const runTest = (): Promise<TestRun> => tests({ cwd, test, config: cfg.test });
+  let lastRaw = "";
+  const runTest = async (): Promise<TestRun> => {
+    const t = await tests({ cwd, test, config: cfg.test });
+    lastRaw = t.raw ?? "";
+    return t;
+  };
+  const countsOf = (t: TestRun): TestCounts | null => t.counts ?? parseCounts(t.text);
+  /** the original tree's test counts, and the best tree a rung left (kept for rung 3 when it beats the original) */
+  let orig: TestCounts | null = null;
+  let best: { rung: number; counts: TestCounts; text: string } | null = null;
+  const noteAttempt = (rung: number, t: TestRun): void => {
+    const c = countsOf(t);
+    if (!c || !orig || !better(c, best?.counts ?? orig)) return;
+    takeSnapshot(cwd, env, BEST_SLOT);
+    best = { rung, counts: c, text: t.text };
+  };
   let started: "ladder" | "pi" = "ladder";
   /** After a pass: the project's formatter/linter on the files the run changed; undone if the test then fails. */
   const lint = async (): Promise<void> => {
@@ -425,6 +565,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
   };
   const done = (solvedBy: SolvedBy, piTurns: number, diagnosis: string | null, handoff: string | null): FixResult => {
     const calls = direct + piTurns;
+    rmSync(undoDir(cwd, env, BEST_SLOT), { recursive: true, force: true });
     logRun({ ts: new Date().toISOString(), model: trunk, started, solved_by: solvedBy }, env);
     say(`solved_by: ${solvedBy}`);
     say(`calls: ${calls}`);
@@ -448,10 +589,9 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
   } else {
     // ---- rung 1
     const head = ["Repository outline:\n" + outline(cwd)];
-    if (test && isFile(cwd, test)) {
-      const first = await runTest();
-      head.push(showFile(cwd, test), "Test output now:\n" + first.text);
-    }
+    const first = await runTest(); // also the original tree's count, for deciding what rung 3 starts from
+    orig = countsOf(first);
+    if (test && isFile(cwd, test)) head.push(showFile(cwd, test), "Test output now:\n" + first.text);
     msgs = [
       { role: "system", content: SYSTEM },
       {
@@ -460,12 +600,15 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
           head.join("\n\n") +
           "\n\nTask:\n" +
           args.task +
-          '\n\nStep 1: reply with JSON {"files": [up to 5 paths from the outline to read or change], "reason": "..."}. ' +
-          "Include files you need to create if their folder exists.",
+          '\n\nStep 1: JSON {"files": [max 5 outline paths to read or change], "reason": "..."}. ' +
+          "Include files to create if folder exists.",
       },
     ];
     pg.step("pick files");
-    const raw = await call("pick", msgs, { schema: PICK_SCHEMA, schemaName: "pick" });
+    // one source file and its tests (an Exercism exercise): no pick call, that file is the pick (dot-dsl 16k: 5 s saved)
+    const only = cfg.ladder.skipSolePick ? soleSource(cwd, test) : null;
+    const raw = only ? JSON.stringify({ files: [only], reason: "only source file" }) : await call("pick", msgs, { schema: PICK_SCHEMA, schemaName: "pick" });
+    if (only) say(`pick skipped: ${only} is the only source file`);
     let picked: string[] = [];
     try {
       const j = JSON.parse(raw) as { files?: unknown };
@@ -485,8 +628,8 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
           role: "user",
           content:
             have.map((p) => showFile(cwd, p)).join("\n\n") +
-            (missing.length ? `\n\n(not found, create if needed: ${missing.join(", ")})` : "") +
-            "\n\nStep 2: reply with edit blocks only.",
+            (missing.length ? `\n\n(missing, create if needed: ${missing.join(", ")})` : "") +
+            "\n\nStep 2: edit blocks only.",
         },
       );
       pg.step("edit");
@@ -500,21 +643,22 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
         await lint();
         return done("rung1", 0, null, null);
       }
+      noteAttempt(1, t);
 
       // ---- rung 2
       if (cfg.ladder.rung2) {
         pg.step("review");
-        diag = await reviewCall(out, workingDiff(cwd, env), cwd, call);
+        diag = await reviewCall(out, lastRaw, workingDiff(cwd, env), cwd, call, cfg.ladder);
         say(`review: ${JSON.stringify(diag)}`);
         msgs.push(
           { role: "assistant", content: reply },
           {
             role: "user",
             content:
-              `Edits applied: ${res.applied.length ? pyList(res.applied) : "none"}. ` +
-              `Not applied (reason): ${formatFailed(res)}.\nTest:\n${out}\n\n` +
-              `A reviewer looked at the failure:\n${diag}\n\n` +
-              "Reply with corrected edit blocks against the files as they are now.",
+              `Applied: ${res.applied.length ? pyList(res.applied) : "none"}. ` +
+              `Not applied: ${formatFailed(res)}.\nTest:\n${out}\n\n` +
+              `Reviewer:\n${diag}\n\n` +
+              "Corrected edit blocks against current files.",
           },
         );
         pg.step("second edit");
@@ -528,6 +672,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
           await lint();
           return done("rung2", 0, diag, null);
         }
+        noteAttempt(2, t);
       }
     }
   }
@@ -538,42 +683,78 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
     return done("none", 0, diag, null);
   }
   if (skipToPi) say(skipToPi);
-  const back = restoreSnapshot(cwd, env);
-  if (back && (back.restored.length || back.removed.length)) {
+  // keep the best tree the ladder produced when it beats the original; else start from the original
+  const keep = cfg.ladder.keepBest ? (best as { rung: number; counts: TestCounts; text: string } | null) : null;
+  const kept = keep && orig ? keptText(keep.rung, keep.counts, keep.text, cfg.ladder.keptFailNames) : null;
+  const back = keep && kept ? restoreSnapshot(cwd, env, BEST_SLOT) : restoreSnapshot(cwd, env);
+  if (kept) say(kept);
+  else if (back && (back.restored.length || back.removed.length)) {
     say(`restored: ${pyList(back.restored)} removed ${pyList(back.removed)} (the loop starts from the original tree)`);
   }
-  const handoff = diag
-    ? `${args.task}\n\nEarlier attempts failed and their edits were undone, so the files are as you first found them. ` +
-      `A reviewer's diagnosis of the last attempt:\n${diag}`
-    : args.task;
+  const state = kept ?? "Earlier attempts failed, edits undone; files as originally found.";
+  const handoff = kept ? `${args.task}\n\n${kept}` : diag ? `${args.task}\n\n${state} ${HANDOVER_MARK}\n${diag}` : args.task;
   say("rung3: pi");
   pg.step("loop");
-  const { turns } = await deps.pi({ text: handoff, turnCap: cfg.ladder.loopTurnCap });
+  const { turns } = await deps.pi({ text: handoff, turnCap: cfg.ladder.loopTurnCap, tree: kept && keep ? keep.counts : orig });
   const fin = await runTest();
   say(`rung3: ${turns} turns, pass ${fin.ok}`);
   if (fin.ok) await lint();
-  return done(fin.ok ? "pi" : "none", turns, diag, handoff);
+  return { ...done(fin.ok ? "pi" : "none", turns, diag, handoff), kept };
 }
 
-/** The rung-2 review: a fresh context, JSON diagnosis (ladder.review). */
+/** Cut `text` to at most `max` characters at a line boundary and say so, so a model never mistakes the cut for the end of the content. */
+export function cutWithMarker(text: string, max: number, what = "diff", note = "files on disk are complete"): string {
+  if (text.length <= max) return text;
+  const head = text.slice(0, max);
+  const nl = head.lastIndexOf("\n");
+  const kept = nl > 0 ? head.slice(0, nl) : head;
+  return `${kept}\n[${what} cut here at ${kept.length} chars; ${note}]`;
+}
+
+/** The part of a rung-3 hand-over a failed `fix` tool call passes back to the model: the reviewer's diagnosis (or the whole text), cut at `max` characters with a marker. */
+export function handoverText(handoff: string, max = 900): string {
+  const i = handoff.indexOf(HANDOVER_MARK);
+  return cutWithMarker(handoff.slice(i >= 0 ? i : 0), max, "hand-over", "length cut, work not incomplete");
+}
+
+/** Paths the working diff changed (`+++ b/path` lines), without duplicates; deleted files left out. */
+export function diffFiles(diff: string): string[] {
+  return [...new Set([...diff.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((m) => m[1]!.trim()))];
+}
+
+/** A file's text with line numbers, whole, or its first `maxLines` lines and the cut marker line (cutWithMarker's wording). */
+export function numberedFile(text: string, maxLines: number): string {
+  const lines = text.replace(/\n$/, "").split("\n");
+  const numbered = lines.map((l, i) => `${String(i + 1).padStart(4)}: ${l}`);
+  if (lines.length <= maxLines) return numbered.join("\n");
+  const head = numbered.slice(0, maxLines).join("\n");
+  return cutWithMarker(numbered.join("\n"), head.length + 1, "file").replace(/cut here at \d+ chars/, `cut here at line ${maxLines} of ${lines.length}`);
+}
+
+/** The rung-2 review: a fresh context, JSON diagnosis (ladder.review). It reads the code, not search hits. */
 async function reviewCall(
   testOut: string,
+  rawOut: string,
   diff: string,
   cwd: string,
   call: (step: string, msgs: Message[], opts?: ChatOptions) => Promise<string>,
+  lad: Config["ladder"],
 ): Promise<string> {
-  const names = (testOut.match(/[A-Za-z_][\w/.]*\.py|[A-Za-z_]\w{3,}/g) ?? []).slice(0, 30).join(" ");
-  const ev = evidence(cwd, names, { hitsCap: 4000, outlineCap: 1500 });
+  const files = diffFiles(diff).filter((p) => isFile(cwd, p));
+  const blocks = failureBlocks(rawOut, lad.reviewFailBlocks, 12);
+  const shown = files.map((p) => `${p} (current, complete)\n\`\`\`\n${numberedFile(readFileSync(join(cwd, p), "utf8"), lad.reviewFileLines)}\n\`\`\``);
+  const parts = [`Test output:\n${testOut}`];
+  if (blocks) parts.push(`Failing assertions:\n${blocks}`);
+  parts.push(shown.length ? `Files changed (current code):\n${shown.join("\n\n")}` : `Diff tried:\n${cutWithMarker(diff, lad.reviewDiffChars) || "(no change was applied)"}`);
+  if (lad.reviewOutlineChars > 0) {
+    const names = (testOut.match(/[A-Za-z_][\w/.]*\.py|[A-Za-z_]\w{3,}/g) ?? []).slice(0, 30).join(" ");
+    parts.push(`Outline:\n${evidence(cwd, names, { hitsCap: 0, outlineCap: lad.reviewOutlineChars }).outline}`);
+  }
   const text = await call(
     "review",
     [
       { role: "system", content: REVIEW_SYSTEM },
-      {
-        role: "user",
-        content:
-          `Test output:\n${testOut}\n\nDiff tried:\n${diff.slice(0, 3000) || "(no change was applied)"}\n\n` +
-          `Outline:\n${ev.outline}\n\nSearch hits:\n${ev.hits}`,
-      },
+      { role: "user", content: parts.join("\n\n") },
     ],
     { schema: REVIEW_SCHEMA, schemaName: "review" },
   );

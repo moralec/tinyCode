@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { evidence, keywords } from "../../src/context/evidence.ts";
 import { gitHunks, parseDiff } from "../../src/context/diff.ts";
 
 function repo(git: boolean): string {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-ev-"));
+  const d = tmpDir("tinycode-ev-");
   mkdirSync(join(d, "pkg"));
   writeFileSync(join(d, "pkg/orders.py"), "def monthly_total(rows):\n    return sum(rows)\n\nclass OrderBook:\n    pass\n");
   writeFileSync(join(d, "README.md"), "# orders\nline two\n");
@@ -37,7 +37,7 @@ test("evidence: git repo and plain folder give outline + scored hits", () => {
 });
 
 test("evidence: caps", () => {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-ev-"));
+  const d = tmpDir("tinycode-ev-");
   writeFileSync(join(d, "a.py"), Array.from({ length: 400 }, (_, i) => `def target_${i}(): pass`).join("\n"));
   const ev = evidence(d, "target", { hitsCap: 300, outlineCap: 40 });
   assert.ok(ev.hits.length <= 300);
@@ -65,5 +65,5 @@ test("parseDiff / gitHunks", () => {
   assert.equal(hs.length, 1);
   assert.equal(hs[0].file, "README.md");
   assert.ok(hs[0].lines.includes("+line TWO"));
-  assert.deepEqual(gitHunks(mkdtempSync(join(tmpdir(), "tinycode-nogit-"))), []);
+  assert.deepEqual(gitHunks(tmpDir("tinycode-nogit-")), []);
 });

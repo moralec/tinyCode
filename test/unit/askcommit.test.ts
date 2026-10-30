@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig, type Config } from "../../src/config.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
 import { actionable, buildIndex, heuristic, route } from "../../src/router.ts";
@@ -14,7 +14,7 @@ import { undoFix } from "../../src/workflows/fix.ts";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const PY = (process.env.TINYCODE_TEST_PYTHON ?? "python3");
-const cfg = (): Config => mergeConfig({ test: { python: PY } });
+const cfg = (): Config => mergeConfig({ test: { python: PY }, ladder: { skipSolePick: false } }); // the scripted replies include the pick
 
 function scripted(replies: string[]) {
   const calls: { step: string; messages: Message[] }[] = [];
@@ -106,7 +106,7 @@ test("diffForModel: every file shows, each trimmed to its share", () => {
 });
 
 function repo() {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-commit-"));
+  const d = tmpDir("tinycode-commit-");
   const git = (...a: string[]) => execFileSync("git", a, { cwd: d, encoding: "utf8" });
   git("init", "-q", ".");
   git("config", "user.email", "t@t");
@@ -209,7 +209,7 @@ test("/commit: a failing pre-commit hook is reported, never bypassed (no --no-ve
 });
 
 test("/commit: not a git repository", async () => {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-nogit-"));
+  const d = tmpDir("tinycode-nogit-");
   const lines: string[] = [];
   const r = await runCommit({ yes: true, hint: "" }, { cwd: d, config: cfg(), chat: scripted([]).chat, report: (l) => lines.push(l) });
   assert.equal(r.outcome, "failed");
@@ -219,7 +219,7 @@ test("/commit: not a git repository", async () => {
 // ---------------------------------------------------------------- the undo fix
 
 test("/fix --undo after /add handed over to the ladder restores the state from before /add (earliest snapshot kept)", async () => {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-undo-"));
+  const d = tmpDir("tinycode-undo-");
   const cwd = join(d, "repo");
   cpSync(join(ROOT, "test/fixtures/task-repos/t03-slugify"), cwd, { recursive: true, filter: (s) => !s.includes("__pycache__") });
   const env = { TINYCODE_LOG: join(d, "state", "calls.jsonl") };

@@ -93,7 +93,7 @@ export function testFileFor(task: PlanTask): string {
   return named.find(looksLikeTest) ?? task.files.map((f) => parseTaskFile(f).path).find((f) => looksLikeTest(f) && isRelativePath(f)) ?? `tests/test_task${task.id}.py`;
 }
 
-export const TEST_SYSTEM = `You write the test that defines when one task of a small software project is done. The test comes first: the code does not exist yet. Reply ONLY with edit blocks for the one test file named in the task, in exactly this format:
+export const TEST_SYSTEM = `Write the test that defines when one task is done. Test first: the code does not exist yet. Reply ONLY edit blocks for the one test file named in the task, exactly:
 
 path/to/test_file.py
 <<<<<<< SEARCH
@@ -102,7 +102,7 @@ exact lines copied from the file
 new lines
 >>>>>>> REPLACE
 
-To create the file, use an empty SEARCH. Edit no other file. No explanations.`;
+New file: empty SEARCH. Edit no other file. No explanations.`;
 
 /** /build declares one phase per task once the plan is read (`task 3/5: title`); a task's ladder shows as a nested `fix`. */
 export const BUILD_PHASES: string[] = [];
@@ -371,7 +371,7 @@ async function runTask(
         content:
           `Repository outline:\n${outline(cwd)}\n\n${header}\n\nWrite the test in ${testFile}.` +
           (exists ? `\n\nIt already exists:\n${showFile(cwd, testFile)}\nAdd this task's test to it.` : "") +
-          "\n\nReply with edit blocks only.",
+          "\n\nEdit blocks only.",
       },
     ];
     const others = repoFiles(cwd).filter((f) => f !== testFile);
@@ -383,7 +383,7 @@ async function runTask(
       // the protected list covers files that exist; a new file other than the test is removed again
       for (const p of res.applied) if (p !== testFile) rmSync(join(cwd, p), { force: true });
       wrote = res.applied.includes(testFile);
-      if (!wrote) msgs.push({ role: "assistant", content: r.text }, { role: "user", content: `Nothing was written to ${testFile}. Reply with edit blocks for ${testFile} only.` });
+      if (!wrote) msgs.push({ role: "assistant", content: r.text }, { role: "user", content: `Nothing written to ${testFile}. Edit blocks for ${testFile} only.` });
     }
     if (!wrote) return stop(`could not write the test ${testFile}`);
     say(`  test written: ${testFile}`);

@@ -38,13 +38,15 @@ export interface ConfirmCtx {
 /**
  * The confirm function to hand a workflow (undefined = it cannot ask).
  *   dev: asks as before (with a UI).
- *   auto, irreversible `kind`: explicit -> proceeds without asking; else asks (with a UI; no UI: undefined).
+ *   auto, irreversible `kind`: explicit -> proceeds without asking; called by the model (`fromTool`) and not asked for in
+ *     the user's message -> declined at once, no dialog (book-store on 02fd96e: an unasked commit's dialog waited 19 min);
+ *     else (a slash command) asks (with a UI; no UI: undefined).
  *   auto, no `kind` (a diagnostic or routine question): never asks, answers `dflt` (true unless `dflt: false`, then undefined).
  */
-export function confirmFor(ctx: ConfirmCtx, o: { kind?: Irreversible; explicit?: boolean; dflt?: boolean } = {}): ((q: string) => Promise<boolean>) | undefined {
+export function confirmFor(ctx: ConfirmCtx, o: { kind?: Irreversible; explicit?: boolean; dflt?: boolean; fromTool?: boolean } = {}): ((q: string) => Promise<boolean>) | undefined {
   const ask = ctx.hasUI ? (q: string) => ctx.ui.confirm("tinyCode", q) : undefined;
   if (isDev()) return ask;
-  if (o.kind) return o.explicit ? async () => true : ask;
+  if (o.kind) return o.explicit ? async () => true : o.fromTool ? async () => false : ask;
   return o.dflt === false ? undefined : async () => true;
 }
 

@@ -7,7 +7,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Config } from "./config.ts";
 import { stuckConfirmFor } from "./mode.ts";
-import { createProgress, type Progress, type ProgressSink, type Summary } from "./progress.ts";
+import { createProgress, CUSTOM_BEAT, type Progress, type ProgressSink, type Summary } from "./progress.ts";
 
 /** The progress that currently owns the screen (a workflow, or the plain-chat one); the Pi loop feeds its todo into it. */
 export const live: { current: Progress | null } = { current: null };
@@ -30,8 +30,8 @@ export function uiSink(pi: ExtensionAPI, ctx: ExtensionContext): ProgressSink {
       lastWidget = key;
       ctx.ui.setWidget("tinycode", l);
     },
-    message: (text) => {
-      if (ui) pi.sendMessage({ customType: "tinycode", content: text, display: true });
+    message: (text, kind) => {
+      if (ui) pi.sendMessage({ customType: kind === "beat" ? CUSTOM_BEAT : "tinycode", content: text, display: true });
       else process.stdout.write(text + "\n");
     },
     err: (line) => {

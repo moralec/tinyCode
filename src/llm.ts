@@ -22,6 +22,8 @@ export interface ChatResult {
   model: string;
   /** true when the fallback lane answered */
   fellBack: boolean;
+  /** the server's finish_reason ("stop", "length", ...), when it sent one */
+  finish?: string;
 }
 export interface TransportRequest {
   url: string;
@@ -99,9 +101,10 @@ async function attempt(
   const body: Record<string, unknown> = {
     model: lane.model,
     messages,
-    temperature: 0,
+    temperature: lane.temperature ?? 0,
     chat_template_kwargs: { enable_thinking: false },
   };
+  if (lane.seed !== undefined) body.seed = lane.seed;
   if (maxTokens !== undefined) body.max_tokens = maxTokens;
   if (opts.schema) {
     body.response_format = {
@@ -143,7 +146,7 @@ async function attempt(
     return { transportFailure: new LlmError(`${laneName}: ${code}: ${(e as Error).message}`, code) };
   }
   const j = (res.json ?? {}) as {
-    choices?: { message?: { content?: string | null } }[];
+    choices?: { message?: { content?: string | null }; finish_reason?: string | null }[];
     usage?: {
       prompt_tokens?: number;
       completion_tokens?: number;
@@ -162,8 +165,9 @@ async function attempt(
   if (typeof content !== "string" && content !== null && content !== undefined) {
     throw new LlmError(`${laneName}: malformed response (no message content)`, res.status);
   }
+  const finish = j.choices?.[0]?.finish_reason;
   return {
-    result: { text: content ?? "", usage, ms: Date.now() - t0, lane: laneName, model: lane.model, fellBack },
+    result: { text: content ?? "", usage, ms: Date.now() - t0, lane: laneName, model: lane.model, fellBack, ...(typeof finish === "string" ? { finish } : {}) },
   };
 }
 

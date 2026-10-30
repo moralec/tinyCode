@@ -24,6 +24,7 @@ import { lintPass, type LintOptions } from "../lint.ts";
 import type { Message } from "../llm.ts";
 import { applyEdit } from "../protocol/apply.ts";
 import { cleanPath, normalizeEol, parseBlocks } from "../protocol/blocks.ts";
+import { trackedFiles } from "../context/evidence.ts";
 import { findTarget } from "./explain.ts";
 import type { ChatFn } from "./fix.ts";
 import { findReadme, parseReadmeArgs, readmeSections, runReadme, type ReadmeArgs, type ReadmeFound, type ReadmeResult } from "./docreadme.ts";
@@ -31,23 +32,20 @@ import { findReadme, parseReadmeArgs, readmeSections, runReadme, type ReadmeArgs
 export const BATCH_SYMBOLS = 6;
 export const BATCH_CHARS = 9000;
 export const MAX_DOC_GROWTH = 1500;
+/** files one /doc request documents; the rest are handed back */
+export const MAX_DOC_FILES = 6;
 const SNIPPET_LINES = 40;
 
-export const DOC_RULES = `You add documentation to code. Reply ONLY with edit blocks, one per symbol, in exactly this format:
+export const DOC_RULES = `Add documentation to code. Reply ONLY edit blocks, one per symbol, exactly:
 
 path/to/file
 <<<<<<< SEARCH
-exact lines copied from the file: the def/class/function line(s) and the first line of the body
+exact lines copied from the file: the def/class/function line(s) and first body line
 =======
-the same lines with the documentation added
+same lines with the documentation added
 >>>>>>> REPLACE
 
-You may add or improve comments and docstrings ONLY. Never change, add, remove, reorder, rename or reformat any code,
-not even whitespace. SEARCH must match the file exactly and be unique (include the first body line). Python: a
-docstring right after the def/class line, indented like the body: one summary line, then Args/Returns only when they
-are not obvious. JavaScript/TypeScript: a /** ... */ comment on the lines above the declaration, same indent, with
-@param/@returns only when not obvious. Say what the code does, from the code shown; do not invent behaviour. No
-explanations outside the blocks.`;
+Add or improve comments and docstrings ONLY. Never change, add, remove, reorder, rename or reformat code, not even whitespace. SEARCH matches file exactly and is unique (include first body line). Python: docstring right after the def/class line, indented like the body: one summary line, Args/Returns only when not obvious. JavaScript/TypeScript: /** ... */ above the declaration, same indent, @param/@returns only when not obvious. Say what the code does, from the shown code; invent no behaviour. No explanations outside the blocks.`;
 
 export interface DocArgs {
   mode: "comments" | "readme";
@@ -92,10 +90,10 @@ export function parseDocArgs(raw: string): DocArgs {
  *   README mentioned, a README exists             -> check its sections (the ones named, else all) and update the stale ones, after asking
  *   README mentioned, no README exists            -> offer to create README.md from the overview content
  */
-export function docArgsFromText(text: string, readmeHeadings: string[] = [], found?: ReadmeFound | null): DocArgs {
+export function docArgsFromText(text: string, readmeHeadings: (string | Heading)[] = [], found?: ReadmeFound | null): DocArgs {
   const low = text.toLowerCase();
   if (/\b(readme|overview|document (this|the) project)\b/.test(low) && !/\b(docstrings?|doc comments?|jsdoc)\b/.test(low)) {
-    const named = readmeHeadings.filter((h) => h.trim() && low.includes(h.trim().toLowerCase()));
+    const named = namedHeadings(text, readmeHeadings);
     const args = parseReadmeArgs(named.length ? `--update ${named.map((h) => `"${h}"`).join(",")}` : "");
     if (found !== undefined) {
       const overview = /\b(overview|document (this|the) project)\b/.test(low) && !/\breadme\b/.test(low);
@@ -110,6 +108,29 @@ export function docArgsFromText(text: string, readmeHeadings: string[] = [], fou
     return { mode: "readme", all: false, task: text, readme: args };
   }
   return { mode: "comments", all: false, task: text, readme: parseReadmeArgs("") };
+}
+
+export interface Heading {
+  title: string;
+  level: number;
+}
+/**
+ * README headings the text names: whole words, not inside a path or `code` ("exporter/cli.py" names no "exporter"
+ * section), and the title (level 1) only when the text calls it a section or quotes it (doc-3-readme: the h1
+ * "exporter" was checked instead of Usage).
+ */
+export function namedHeadings(text: string, headings: (string | Heading)[]): string[] {
+  const prose = text.replace(/`[^`]*`/g, " ").replace(/(?<![\w/.-])[\w./-]*[\w-][/.][\w-][\w./-]*/g, " ").toLowerCase();
+  const word = (t: string) => new RegExp(`(?<![\\w])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w])`);
+  const out: string[] = [];
+  for (const h of headings) {
+    const { title, level } = typeof h === "string" ? { title: h, level: 2 } : h;
+    const t = title.trim().toLowerCase();
+    if (!t || !word(t).test(prose)) continue;
+    if (level <= 1 && !new RegExp(`["'\u201c]${word(t).source}["'\u201d]|${word(t).source}\\s+(?:section|heading|part)\\b`).test(prose)) continue;
+    if (!out.includes(title.trim())) out.push(title.trim());
+  }
+  return out;
 }
 
 const STRIP_TS =
@@ -216,10 +237,11 @@ export function applyDocBlocks(reply: string, path: string, original: string, te
 const snippet = (lines: string[], s: Sym): string => lines.slice(s.line - 1, Math.min(s.end, s.line - 1 + SNIPPET_LINES)).join("\n");
 
 /** Symbols still without a doc, grouped into batches of keys. */
-export function batchSymbols(text: string, lang: Lang, only?: string): { batches: string[][]; wanted: Sym[] } {
+export function batchSymbols(text: string, lang: Lang, only?: string | string[]): { batches: string[][]; wanted: Sym[] } {
   const lines = text.split("\n");
   let wanted = listSymbols(lang, text).filter((s) => !s.hasDoc);
-  if (only) wanted = wanted.filter((s) => s.kind !== "module" && (s.name === only || s.name.endsWith("." + only)));
+  const names = only === undefined ? [] : Array.isArray(only) ? only : [only];
+  if (names.length) wanted = wanted.filter((s) => s.kind !== "module" && names.some((n) => s.name === n || s.name.endsWith("." + n)));
   const batches: string[][] = [];
   let cur: string[] = [];
   let chars = 0;
@@ -264,6 +286,72 @@ export interface DocResult {
   changed: boolean;
   lines: string[];
   reason?: string;
+  /** a request naming several files: the ones changed, and the ones not documented with why (handed back) */
+  files?: string[];
+  left?: string[];
+}
+
+const DOC_TEST = /(^|\/)(tests?|__tests__)\/|(^|\/)test_|_test\.|\.test\.|\.spec\.|(^|\/)conftest\./;
+const escRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * The code files a comments request names, in order: each file by path or unique file name, and the code files of a
+ * named folder ("the todo package", "todo/", "module cal"; no tests, no file without a def or class). One file or
+ * none: [] (findTarget handles it, symbols included).
+ */
+export function docTargets(task: string, files: string[], read: (f: string) => string | null): string[] {
+  const code = files.filter((f) => langOf(f) && !/\.(jsx|tsx)$/.test(f));
+  const out: string[] = [];
+  const put = (f: string) => {
+    if (!out.includes(f)) out.push(f);
+  };
+  const base = (f: string) => f.slice(f.lastIndexOf("/") + 1);
+  const at = (re: RegExp) => re.exec(task)?.index ?? -1;
+  const hits: [number, string[]][] = [];
+  for (const f of code) {
+    const i = at(new RegExp(`(?<![\\w/.-])${escRe(f)}(?![\\w])`));
+    const j = i < 0 && code.filter((g) => base(g) === base(f)).length === 1 ? at(new RegExp(`(?<![\\w/.-])${escRe(base(f))}(?![\\w])`)) : -1;
+    if (i >= 0 || j >= 0) hits.push([Math.max(i, j), [f]]);
+  }
+  const dirs = [...new Set(code.map((f) => f.slice(0, f.lastIndexOf("/"))).filter(Boolean))];
+  for (const d of dirs) {
+    const n = escRe(base(d));
+    const i = Math.max(
+      at(new RegExp(`(?<![\\w/.-])${escRe(d)}/(?![\\w])`)),
+      at(new RegExp(`(?<![\\w/.-])${n}\\s+(?:package|module|folder|directory|dir)\\b|\\b(?:package|module|folder|directory)\\s+${n}(?![\\w/.-])`, "i")),
+    );
+    if (i < 0) continue;
+    const inside = code.filter((f) => f.startsWith(`${d}/`) && !DOC_TEST.test(f) && /^\s*(?:export\s+)?(?:async\s+)?(?:def|class|function)\s/m.test(read(f) ?? ""));
+    if (inside.length) hits.push([i, inside]);
+  }
+  for (const [, fs] of hits.sort((a, b) => a[0] - b[0])) fs.forEach(put);
+  return out.length > 1 ? out : [];
+}
+
+/** A request naming several files: /doc on each (whole file), up to MAX_DOC_FILES; what failed or did not fit is listed in `left`. */
+async function runDocFiles(args: DocArgs, deps: DocDeps, targets: string[]): Promise<DocResult> {
+  const lines: string[] = [];
+  const report = (l: string) => {
+    lines.push(l);
+    deps.report(l);
+  };
+  report(`targets: ${targets.join(", ")}${targets.length > MAX_DOC_FILES ? ` (first ${MAX_DOC_FILES})` : ""}`);
+  let calls = 0;
+  const documented: string[] = [];
+  const refused: string[] = [];
+  const files: string[] = [];
+  const left: string[] = [];
+  for (const f of targets.slice(0, MAX_DOC_FILES)) {
+    const r = await runDocComments({ ...args, file: f, all: false }, { ...deps, report });
+    calls += r.calls;
+    documented.push(...r.documented);
+    refused.push(...r.refused);
+    if (r.changed) files.push(f);
+    if (!r.ok) left.push(`${f} (${r.reason ?? "failed"})`);
+  }
+  for (const f of targets.slice(MAX_DOC_FILES)) left.push(`${f} (over ${MAX_DOC_FILES} files)`);
+  const ok = !left.length || files.length > 0;
+  return { ok, calls, file: files[0] ?? targets[0]!, documented, refused, changed: files.length > 0, lines, reason: ok ? "pass" : (left[0] ?? "failed"), files, left };
 }
 
 export async function runDocComments(args: DocArgs, deps: DocDeps): Promise<DocResult> {
@@ -279,6 +367,18 @@ export async function runDocComments(args: DocArgs, deps: DocDeps): Promise<DocR
   if (!args.file && !args.task) {
     say("usage: /doc [--file PATH] <file, symbol or task>   |   /doc readme [--update SECTION[,SECTION]] [--out DIR] [--max-files N] [--related a,b]");
     return res(false, "usage", null);
+  }
+  // several files (or a package) named: each one whole (doc-1-cal named two, the run documented one)
+  if (!args.file) {
+    const read = (f: string): string | null => {
+      try {
+        return readFileSync(join(cwd, f), "utf8");
+      } catch {
+        return null;
+      }
+    };
+    const many = docTargets(args.task, trackedFiles(cwd), read);
+    if (many.length) return runDocFiles(args, deps, many);
   }
   const target = findTarget(cwd, { file: args.file, question: args.task });
   if (!target) {
@@ -301,11 +401,14 @@ export async function runDocComments(args: DocArgs, deps: DocDeps): Promise<DocR
   }
   const eol = raw.includes("\r\n") ? "\r\n" : "\n";
   const original = normalizeEol(raw);
-  const only = args.all ? undefined : target.symbol;
+  // one symbol named: that one; several: each of them; "every / all / each": the whole file
+  const named = target.symbol ? listSymbols(lang, original).filter((x) => x.kind !== "module" && new RegExp(`(?<![\\w.])${escRe(x.name.slice(x.name.lastIndexOf(".") + 1))}(?![\\w])`).test(args.task)).map((x) => x.name) : [];
+  const whole = args.all || /\b(?:every|all|each)\b/i.test(args.task);
+  const only = whole || !target.symbol ? undefined : named.length > 1 ? [...new Set(named)] : target.symbol;
   const { batches, wanted } = batchSymbols(original, lang, only);
-  say(`target: ${file}${target.symbol && !args.all ? ` (${target.symbol})` : ""}`);
+  say(`target: ${file}${only ? ` (${[only].flat().join(", ")})` : ""}`);
   if (!wanted.length) {
-    say(only ? `${only} already has a doc, or was not found as a function, class or method in ${file}; nothing to do` : `every symbol in ${file} already has a doc; nothing to do`);
+    say(only ? `${[only].flat().join(", ")} already has a doc, or was not found as a function, class or method in ${file}; nothing to do` : `every symbol in ${file} already has a doc; nothing to do`);
     return res(true, "nothing-to-do", file);
   }
   say(`${wanted.length} symbol(s) without a doc, ${batches.length} batch(es)`);
@@ -321,7 +424,7 @@ export async function runDocComments(args: DocArgs, deps: DocDeps): Promise<DocR
     if (!syms.length) continue;
     const cl = cur.split("\n");
     const body = syms.map((s) => `--- ${s.kind} ${s.name} (line ${s.line}) ---\n${snippet(cl, s)}`).join("\n\n");
-    const head = `File: ${file}\n${style} to exactly these symbols and nothing else:\n${syms.map((s) => `- ${s.kind} ${s.name}`).join("\n")}\n\nCode:\n${body}\n\nReply with edit blocks only.`;
+    const head = `File: ${file}\n${style} to exactly these symbols and nothing else:\n${syms.map((s) => `- ${s.kind} ${s.name}`).join("\n")}\n\nCode:\n${body}\n\nEdit blocks only.`;
     const messages: Message[] = [
       { role: "system", content: DOC_RULES },
       { role: "user", content: head },
@@ -339,7 +442,7 @@ export async function runDocComments(args: DocArgs, deps: DocDeps): Promise<DocR
       if (attempt === 0) {
         messages.push(
           { role: "assistant", content: r.text },
-          { role: "user", content: `Not accepted: ${g.refused.join("; ")}. Blocks that were accepted are already applied. Reply with corrected edit blocks for the rest only; comments and docstrings only, code untouched.` },
+          { role: "user", content: `Not accepted: ${g.refused.join("; ")}. Accepted blocks already applied. Corrected edit blocks for the rest only; comments/docstrings only, code untouched.` },
         );
         say("retrying the batch once");
       }
@@ -390,10 +493,14 @@ export async function runDoc(args: DocArgs, deps: DocDeps): Promise<DocRunResult
 
 /** Section titles of the project's README (Markdown headings or HTML h2/h3/<section>; empty when there is none): lets routed text name a section to update. */
 export function readmeHeadings(cwd: string): string[] {
+  return readmeHeadingLevels(cwd).map((h) => h.title);
+}
+/** The same headings with their level (1 = the title). */
+export function readmeHeadingLevels(cwd: string): Heading[] {
   const f = findReadme(cwd);
   if (!f) return [];
   try {
-    return readmeSections(readFileSync(join(cwd, f.rel), "utf8").replace(/\r\n/g, "\n"), f.kind).map((x) => x.title);
+    return readmeSections(readFileSync(join(cwd, f.rel), "utf8").replace(/\r\n/g, "\n"), f.kind).map((x) => ({ title: x.title, level: x.level }));
   } catch {
     return [];
   }

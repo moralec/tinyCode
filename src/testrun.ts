@@ -8,12 +8,47 @@ export interface TestConfig {
   python: string;
   command: string | null;
 }
+/** Test counts read from a runner's summary; failed includes errors. */
+export interface TestCounts {
+  passed: number;
+  failed: number;
+}
 export interface TestRun {
   ok: boolean;
+  /** counts from the runner's summary, when they could be read (absent = unknown) */
+  counts?: TestCounts | null;
   /** the trimmed text the model sees, starting `PASS` or `FAIL` */
   text: string;
+  /** the runner's whole output (absent when a test double gives none); `failureBlocks` reads it */
+  raw?: string;
   code: number | null;
   timedOut: boolean;
+}
+
+/**
+ * Passed / failed counts from a runner's summary line (pure): pytest `4 failed, 6 passed in 0.5s`, jest and vitest
+ * `Tests: 4 failed, 6 passed, 10 total`, unittest `Ran 10 tests` + `FAILED (failures=4)` / `OK`. null = not recognised.
+ */
+export function parseCounts(output: string): TestCounts | null {
+  const lines = output.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]!;
+    if (/^\s*Tests:\s/.test(l) && /\btotal\b/.test(l)) {
+      const n = (w: string) => Number(l.match(new RegExp(`(\\d+) ${w}`))?.[1] ?? 0);
+      return { passed: n("passed"), failed: n("failed") };
+    }
+    if (/\b(passed|failed|errors?)\b/.test(l) && /\bin [\d.]+s\b/.test(l)) {
+      const n = (w: string) => Number(l.match(new RegExp(`(\\d+) ${w}\\b`))?.[1] ?? 0);
+      return { passed: n("passed"), failed: n("failed") + n("errors?") };
+    }
+  }
+  const ran = output.match(/^Ran (\d+) tests? in /m);
+  if (ran) {
+    const bad = output.match(/^FAILED \((.*)\)/m);
+    const failed = bad ? [...bad[1]!.matchAll(/(?:failures|errors)=(\d+)/g)].reduce((s, m) => s + Number(m[1]), 0) : 0;
+    return { passed: Math.max(0, Number(ran[1]) - failed), failed };
+  }
+  return null;
 }
 
 /** Trim raw pytest output (pure; unit-tested without running anything). */
@@ -33,6 +68,47 @@ export function trimTestOutput(output: string, code: number | null): { ok: boole
   const block = first >= 0 ? lines.slice(start, start + 12) : lines.slice(-12);
   const text = `FAIL ${summary}\n${failing.join("\n")}\nFirst error:\n${block.join("\n")}`;
   return { ok: false, text: text.slice(0, TEST_CHARS) };
+}
+
+/** Names of the failing tests in a trimmed test text (`FAILED path::name - msg` lines): at most `max`, and how many failed lines there were. */
+export function failingNames(text: string, max: number): { names: string[]; total: number } {
+  const all = text
+    .split("\n")
+    .map((l) => l.match(/^(?:FAILED|ERROR) (.+?)(?: - .*)?$/)?.[1]?.trim())
+    .filter((n): n is string => !!n)
+    .map((n) => n.slice(n.indexOf("::") + 2 || 0));
+  return { names: all.slice(0, max), total: all.length };
+}
+
+/** The first `E ...` line of a test text (the assertion message of the first failing test), at most 200 chars; null when there is none. */
+export function firstErrorLine(text: string): string | null {
+  const m = text.match(/^E\s+(.+)$/m);
+  return m ? m[1]!.trim().slice(0, 200) : null;
+}
+
+/**
+ * Per failing test, the lines pytest prints for it in the raw output: its header, the `>` line (the failing statement),
+ * the `E` lines and the `file.py:N: Error` location line. At most `maxBlocks` blocks of `maxLines` lines each; "" when
+ * the output has no such sections (another runner).
+ */
+export function failureBlocks(raw: string, maxBlocks: number, maxLines: number): string {
+  const lines = raw.split("\n");
+  const blocks: string[] = [];
+  let cur: string[] | null = null;
+  const flush = () => {
+    if (cur && cur.length > 1) blocks.push(cur.slice(0, maxLines).join("\n"));
+    cur = null;
+  };
+  for (const l of lines) {
+    const h = l.match(/^_{3,} (.+?) _{3,}$/);
+    if (h) {
+      flush();
+      cur = [h[1]!];
+    } else if (/^={3,} /.test(l)) flush();
+    else if (cur && (/^>/.test(l) || /^E(\s|$)/.test(l) || /^\S+:\d+: \w/.test(l))) cur.push(l.slice(0, 200));
+  }
+  flush();
+  return blocks.slice(0, maxBlocks).join("\n\n");
 }
 
 const quote = (s: string) => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
@@ -82,7 +158,7 @@ export function runTests(opts: {
         resolve({ ok: false, text: `FAIL tests timed out after ${Math.round(timeoutMs / 1000)}s\n${out.split("\n").slice(-12).join("\n")}`.slice(0, TEST_CHARS), code, timedOut });
         return;
       }
-      resolve({ ...trimTestOutput(out, code), code, timedOut });
+      resolve({ ...trimTestOutput(out, code), raw: out, counts: parseCounts(out), code, timedOut });
     };
     const timer = setTimeout(() => {
       timedOut = true;

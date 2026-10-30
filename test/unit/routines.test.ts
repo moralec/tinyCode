@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { plainRoutine, pyRoutine, routineFor, run, scptRoutine, RoutineError } from "../../src/routines/index.ts";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const PY = (process.env.TINYCODE_TEST_PYTHON ?? "python3");
-const tmp = () => mkdtempSync(join(tmpdir(), "tinycode-rt-"));
+const tmp = () => tmpDir("tinycode-rt-");
 const mac = scptRoutine.available();
 const SKIP = mac.ok ? false : "skipped: needs macOS";
 

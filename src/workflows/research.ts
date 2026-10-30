@@ -23,18 +23,18 @@ export const ANSWER_SCHEMA = {
   required: ["answer", "sources"],
 };
 
-export const RESEARCH_SYSTEM = `You research a developer's question with tools, one call at a time, then stop.
-Reply with JSON only: {"tool":"<name>","arg":"<argument>"}.
+export const RESEARCH_SYSTEM = `Research a developer's question with tools, one call at a time, then stop.
+Reply JSON only: {"tool":"<name>","arg":"<argument>"}.
 Tools:
-- github_repos: arg = search words; lists public GitHub repositories (name, stars, language, description, url).
-- github_code: arg = search words; lists code files on GitHub (needs a token, may be refused).
-- fetch: arg = an http(s) URL you saw in a result; returns the page as plain text (a README, a docs page).
-- find: arg = a question about the local project's code; returns a short answer with path:line.
-- done: arg = "" ; you have enough to answer.
-Prefer github_repos first, then fetch the README of the two or three best repos. Never repeat a call. Only cite URLs you saw in a result.`;
+- github_repos: arg = search words; public GitHub repos (name, stars, language, description, url).
+- github_code: arg = search words; GitHub code files (needs token, may be refused).
+- fetch: arg = http(s) URL seen in a result; page as plain text (README, docs).
+- find: arg = question about local project code; short answer with path:line.
+- done: arg = ""; enough to answer.
+github_repos first, then fetch README of the 2-3 best repos. Never repeat a call. Cite only URLs seen in a result.`;
 
 const SUMMARY_USER = (words: number, question: string) =>
-  `Now answer the question: ${question}\nAt most ${words} words, plain text. Compare the options if asked. List in "sources" the URLs you relied on, copied exactly from the results above (GitHub repository links first).`;
+  `Answer now: ${question}\nMax ${words} words, plain text. Compare options if asked. "sources": URLs relied on, copied exactly from results above (GitHub repo links first).`;
 
 export interface ResearchArgs {
   question: string;
@@ -220,7 +220,7 @@ export async function runResearch(args: ResearchArgs, deps: ResearchDeps): Promi
         stopped = "invalid";
         break;
       }
-      messages.push({ role: "user", content: `Reply with JSON {"tool":"<one of ${RESEARCH_TOOLS.join(", ")}>","arg":"..."}. Steps left: ${rc.maxSteps - steps}.` });
+      messages.push({ role: "user", content: `JSON {"tool":"<one of ${RESEARCH_TOOLS.join(", ")}>","arg":"..."}. Steps left: ${rc.maxSteps - steps}.` });
       continue;
     }
     badReplies = 0;

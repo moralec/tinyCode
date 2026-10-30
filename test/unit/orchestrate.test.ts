@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig, type Config } from "../../src/config.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
-import { agreement, asToolTurn, beforeSentence, choose, CUSTOM_RESULT, directCall, DoneGuard, formatOrchestration, rateFor, resultMessage, runDirect, templateSentence, type DecisionRecord, type DirectCall } from "../../src/orchestrate.ts";
+import { agreement, asToolTurn, choose, CUSTOM_RESULT, directCall, DoneGuard, formatOrchestration, namedFiles, rateFor, resultMessage, runDirect, scopeAfter, scopeBefore, sentenceFor, targetOf, type DecisionRecord, type DirectCall } from "../../src/orchestrate.ts";
 import { buildIndex, heuristic, route } from "../../src/router.ts";
 import { statusLine } from "../../src/tools.ts";
 import type { ChatFn } from "../../src/workflows/fix.ts";
@@ -14,7 +14,7 @@ const O = mergeConfig({}).orchestration;
 const withMode = (mode: string, extra: object = {}) => mergeConfig({ orchestration: { mode, ...extra } }).orchestration;
 
 function repo() {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-orch-"));
+  const d = tmpDir("tinycode-orch-");
   mkdirSync(join(d, "orders"));
   writeFileSync(join(d, "orders/report.py"), "def monthly_totals(rows):\n    return rows\n");
   return buildIndex(d);
@@ -42,8 +42,8 @@ test("config: orchestration defaults to auto, learn on; a plain string is shorth
   assert.equal(mergeConfig({ orchestration: { learn: false } }).orchestration.learn, false);
   assert.throws(() => mergeConfig({ orchestration: "loud" }), /orchestration/);
   assert.throws(() => mergeConfig({ orchestration: { minAgreement: 2 } }), /minAgreement/);
-  assert.equal(mergeConfig({}).limits.maxTokens.say, 60);
-  assert.equal(mergeConfig({}).steps.say.lane, "trunk");
+  assert.equal("say" in mergeConfig({}).limits.maxTokens, false);
+  assert.equal("say" in mergeConfig({}).steps, false);
 });
 
 test("the router's answer maps to a tool call with its parameters; a question or a file-less edit maps to none", () => {
@@ -110,33 +110,16 @@ test("stats text: direct runs and one agreement row per model", () => {
 
 const CALL: DirectCall = { tool: "fix", params: { task: "fix it", file: "orders/report.py" } };
 
-test("before-sentence: one tiny call on the 'say' step (constant system prefix, request last); the model's one line is used", async () => {
-  const c = fakeChat('"I\'ll fix the doubled January rows in orders/report.py."\nand more text');
-  const s = await beforeSentence(c.fn, "monthly_totals gives two rows, fix it", CALL);
-  assert.equal(s.source, "model");
-  assert.equal(s.text, "I'll fix the doubled January rows in orders/report.py.");
-  assert.equal(c.calls.length, 1);
-  assert.equal(c.calls[0]!.step, "say");
-  assert.equal(c.calls[0]!.messages[0]!.role, "system");
-  assert.ok(c.calls[0]!.messages[0]!.content.length < 250, "tiny, constant prefix");
-  assert.match(c.calls[0]!.messages[1]!.content, /Workflow: fix\nFile: orders\/report\.py\nRequest: monthly_totals/);
+test("the sentence before a direct run is fixed text per workflow, from code", () => {
+  assert.equal(sentenceFor(CALL), "Fixing the bug in orders/report.py.");
+  assert.equal(sentenceFor({ tool: "plan", params: { request: "x" } }), "Making the task list.");
 });
 
-test("before-sentence: a failing or empty call falls back to the template sentence", async () => {
-  assert.deepEqual((await beforeSentence(fakeChat(new Error("door down")).fn, "fix it", CALL)).source, "template");
-  const t = await beforeSentence(fakeChat("").fn, "fix it", CALL);
-  assert.equal(t.text, "I'll fix the bug in orders/report.py.");
-  assert.equal(templateSentence({ tool: "plan", params: { request: "x" } }), "I'll turn the request into a task list.");
-});
-
-function deps(chatReply: string | Error, outcome: { text: string; ok: boolean; remaining?: string } | Error) {
-  const c = fakeChat(chatReply);
+function deps(outcome: { text: string; ok: boolean; remaining?: string } | Error) {
   const order: string[] = [];
   return {
-    c,
     order,
     d: {
-      chat: ((...a: Parameters<ChatFn>) => (order.push("say-call"), c.fn(...a))) as ChatFn,
       show: (s: string) => void order.push(`show:${s}`),
       run: async (call: DirectCall) => {
         order.push(`run:${call.tool}`);
@@ -148,25 +131,26 @@ function deps(chatReply: string | Error, outcome: { text: string; ok: boolean; r
 }
 
 test("confident -> direct run: the sentence is shown BEFORE the run, the result ends with STATUS, then the after-report turn is handed over as the tool's output", async () => {
-  const { d, order } = deps("I'll fix the bug in orders/report.py.", { text: "solved by rung1; files: orders/report.py", ok: true });
-  const r = await runDirect(d, "fix it", CALL);
-  assert.deepEqual(order, ["say-call", "show:I'll fix the bug in orders/report.py.", "run:fix"]);
+  const { d, order } = deps({ text: "solved by rung1; files: orders/report.py", ok: true });
+  const r = await runDirect(d, CALL);
+  assert.deepEqual(order, ["show:Fixing the bug in orders/report.py.", "run:fix"]);
   assert.equal(r.status, "done");
   assert.equal(r.text, `solved by rung1; files: orders/report.py\n${statusLine({ text: "", ok: true })}`);
   // what Pi holds after before_agent_start: the user's request, then the custom result message
   const msgs = [
-    { role: "custom", customType: "tinycode-say", content: r.said.text, display: true, details: { direct: true }, timestamp: 1 },
+    { role: "custom", customType: "tinycode-say", content: r.said, display: true, details: { direct: true }, timestamp: 1 },
     { role: "user", content: [{ type: "text", text: "fix it" }], timestamp: 2 },
     { role: "custom", ...resultMessage(r), timestamp: 3 },
   ];
   const turned = asToolTurn(msgs, { id: "gemma-4-12b", provider: "tinycode", api: "openai-completions" })!;
   assert.deepEqual(turned.map((m) => m.role), ["user", "assistant", "toolResult"], "the say message is folded in; the result is a tool turn, not a user message");
   const asst = turned[1]! as unknown as { content: { type: string; text?: string; name?: string; id?: string; arguments?: Record<string, string> }[] };
-  assert.equal(asst.content[0]!.text, r.said.text);
-  assert.equal(asst.content[1]!.name, "fix");
-  assert.equal(asst.content[1]!.arguments!.task, "fix it");
+  assert.equal(asst.content.length, 1, "the sentence is the call's intent, not a second copy as text");
+  assert.equal(asst.content[0]!.name, "fix");
+  assert.equal(asst.content[0]!.arguments!.intent, r.said);
+  assert.equal(asst.content[0]!.arguments!.task, "fix it");
   const tr = turned[2]! as unknown as { toolCallId: string; content: { text: string }[]; isError: boolean };
-  assert.equal(tr.toolCallId, asst.content[1]!.id);
+  assert.equal(tr.toolCallId, asst.content[0]!.id);
   assert.match(tr.content[0]!.text, /STATUS: done/);
   assert.doesNotMatch(tr.content[0]!.text, /^\[result of/);
   assert.equal(tr.isError, false);
@@ -179,26 +163,26 @@ test("confident -> direct run: the sentence is shown BEFORE the run, the result 
 });
 
 test("without a model to build the tool turn the custom message still labels the text as the tool's output", async () => {
-  const { d } = deps("I'll fix the bug.", { text: "ok", ok: true });
-  const m = resultMessage(await runDirect(d, "fix it", CALL));
+  const { d } = deps({ text: "ok", ok: true });
+  const m = resultMessage(await runDirect(d, CALL));
   assert.equal(m.customType, CUSTOM_RESULT);
-  assert.match(m.content, /^\[result of the fix tool, run by tinyCode/);
+  assert.match(m.content, /^\[result of the fix tool, run by tinyCode\]/);
   assert.equal(asToolTurn([{ role: "user", content: "x" }], { id: "m", provider: "p", api: "a" }), undefined);
 });
 
 test("done -> the model reports and does not rerun: the guard refuses the same tool; failed or partial lets it retry", async () => {
   const g = new DoneGuard();
-  const done = await runDirect(deps("I'll fix it now.", { text: "solved", ok: true }).d, "fix it", CALL);
+  const done = await runDirect(deps({ text: "solved", ok: true }).d, CALL);
   g.record(done.call.tool, done.status);
-  assert.match(g.check("fix")!, /already finished \(STATUS: done\)/);
+  assert.match(g.check("fix")!, /STATUS: done already/);
   assert.equal(g.check("review"), null, "another workflow is fine");
   g.reset();
-  const failed = await runDirect(deps("I'll fix it now.", { text: "no rung solved it", ok: false }).d, "fix it", CALL);
+  const failed = await runDirect(deps({ text: "no rung solved it", ok: false }).d, CALL);
   assert.equal(failed.status, "failed");
-  assert.match(failed.text, /STATUS: failed .*you may continue with raw tools/);
+  assert.match(failed.text, /STATUS: failed .*raw tools ok/);
   g.record("fix", failed.status);
   assert.equal(g.check("fix"), null, "failed: the model may retry");
-  const partial = await runDirect(deps("I'll add it.", { text: "half", ok: true, remaining: "tests missing" }).d, "x", CALL);
+  const partial = await runDirect(deps({ text: "half", ok: true, remaining: "tests missing" }).d, CALL);
   assert.equal(partial.status, "partial");
   assert.match(partial.text, /STATUS: partial — tests missing/);
   g.record("fix", partial.status);
@@ -208,9 +192,8 @@ test("done -> the model reports and does not rerun: the guard refuses the same t
   assert.equal((turned[2] as unknown as { isError: boolean }).isError, true);
 });
 
-test("a throwing workflow becomes a failed result for the model, never an exception; a dead say-call does not stop the run", async () => {
-  const r = await runDirect(deps(new Error("door down"), new Error("boom")).d, "fix it", CALL);
-  assert.equal(r.said.source, "template");
+test("a throwing workflow becomes a failed result for the model, never an exception", async () => {
+  const r = await runDirect(deps(new Error("boom")).d, CALL);
   assert.equal(r.status, "failed");
   assert.match(r.text, /fix failed: boom/);
 });
@@ -226,4 +209,71 @@ test("unsure and question requests give the model the tools: no direct call, so 
   const routed = await route("sort that out", idx, async () => res(JSON.stringify({ workflow: "fix", file: "orders/report.py", goal: "sort that out", confident: true })));
   assert.equal(routed.source, "model");
   assert.equal(choose(O, routed, null).direct, null);
+});
+
+test("scope: named files are paths, unique file names and dotted modules; one the request says to leave alone is not", () => {
+  const files = ["exporter/cli.py", "exporter/settings.py", "exporter/formats/__init__.py", "app/server.py", "app/config.py", "listutil.py"];
+  assert.deepEqual(namedFiles("Add a csv format: `python -m exporter.cli --format csv in.json out.csv`. Register it, with its own extension in exporter/settings.py.", files), ["exporter/cli.py", "exporter/settings.py"]);
+  assert.deepEqual(namedFiles("Add an option to `load_config` in app/config.py. app/server.py must keep working unchanged. Add a test.", files), ["app/config.py"]);
+  assert.deepEqual(namedFiles("Add `chunk(seq, n)` to listutil.py: it splits a list.", files), ["listutil.py"]);
+  assert.deepEqual(namedFiles("Add docstrings to the todo package.", files), []);
+});
+
+test("scope: a named file the run did not change, and a removed name untouched files still use, are left; a covered request leaves nothing", () => {
+  const tree = new Map<string, string>([
+    ["shop/pricing.py", "def calc_total(lines):\n    return 1\n"],
+    ["shop/cart.py", "from shop.pricing import calc_total\n\ndef total():\n    return calc_total([])\n"],
+    ["shop/invoice.py", "def text():\n    return 'x'\n"],
+  ]);
+  const read = (p: string) => tree.get(p) ?? null;
+  const files = () => [...tree.keys()];
+  const req = "Rename `calc_total` to `compute_total` everywhere: its definition in shop/pricing.py and every caller.";
+  const b = scopeBefore(req, files(), read);
+  assert.deepEqual(b.names, ["calc_total"], "compute_total is not defined yet, so it is not watched");
+  assert.equal(scopeAfter(b, files(), read), "named, untouched: shop/pricing.py");
+  tree.set("shop/pricing.py", "def compute_total(lines):\n    return 1\n");
+  assert.equal(scopeAfter(b, files(), read), "calc_total gone, still used: shop/cart.py");
+  tree.set("shop/cart.py", "from shop.pricing import compute_total\n\ndef total():\n    return compute_total([])\n");
+  assert.equal(scopeAfter(b, files(), read), "");
+  // a name still defined is no question of scope (callers elsewhere are fine)
+  const b2 = scopeBefore("In shop/pricing.py, change `compute_total` to round down.", files(), read);
+  tree.set("shop/pricing.py", "def compute_total(lines):\n    return 0\n");
+  assert.equal(scopeAfter(b2, files(), read), "");
+});
+
+test("direct run: done with named files left alone becomes partial (Pi finishes it, the guard lets it retry); fix and README runs are not scope-checked", async () => {
+  let asked = 0;
+  const scope = () => {
+    asked++;
+    return () => "named, untouched: exporter/cli.py";
+  };
+  const edit: DirectCall = { tool: "edit_file", params: { path: "exporter/settings.py", instruction: "add csv" } };
+  const r = await runDirect({ ...deps({ text: "edit done: edited exporter/settings.py", ok: true }).d, scope }, edit);
+  assert.equal(r.status, "partial");
+  assert.match(r.text, /STATUS: partial — named, untouched: exporter\/cli\.py; check, finish with read\/edit$/);
+  assert.doesNotMatch(r.text, /Report to user, stop/);
+  const g = new DoneGuard();
+  g.record(r.call.tool, r.status);
+  assert.equal(g.check("edit_file"), null);
+  // nothing left: done as before
+  const ok = await runDirect({ ...deps({ text: "edit done", ok: true }).d, scope: () => () => "" }, edit);
+  assert.equal(ok.status, "done");
+  // a failed run stays failed; fix and a README target never ask
+  asked = 0;
+  const failed = await runDirect({ ...deps({ text: "no", ok: false }).d, scope }, edit);
+  assert.equal(failed.status, "failed");
+  await runDirect({ ...deps({ text: "solved", ok: true }).d, scope }, CALL);
+  const readme = await runDirect({ ...deps({ text: "doc readme done", ok: true }).d, scope }, { tool: "doc", params: { request: "update README", file: "README.md" } });
+  assert.equal(readme.status, "done");
+  assert.equal(asked, 1, "only the failed edit asked; fix and README did not");
+});
+
+test("the done guard keys on (tool, target): the same tool on another file may run; the same file is refused", () => {
+  const g = new DoneGuard();
+  g.record("edit_file", "done", targetOf({ path: "shop/pricing.py", instruction: "x" }));
+  assert.match(g.check("edit_file", targetOf({ path: "./shop/pricing.py" }))!, /edit_file shop\/pricing\.py STATUS: done already/);
+  assert.equal(g.check("edit_file", targetOf({ path: "shop/cart.py" })), null, "edit-3 r3: a second file is a new job");
+  g.record("doc", "done", targetOf({ request: "docstrings for cal", file: "" }));
+  assert.equal(g.check("doc", targetOf({ file: "cal/leap.py" })), null, "doc-1: the file the first run did not pick");
+  assert.match(g.check("doc", targetOf({ request: "again" }))!, /^doc STATUS: done already/);
 });

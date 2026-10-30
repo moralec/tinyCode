@@ -2,12 +2,14 @@
 // applyReply adds the whole-file fallback. Deliberate differences from tc0, all listed in test/unit/apply.test.ts:
 //  - paths outside cwd (absolute, drive letters, symlink-free escapes) are refused as "bad path" (tc0 only refused "..")
 //  - a file's CRLF line endings are matched as LF and written back as CRLF (tc0 rewrote the file as LF)
+//  - a block whose SEARCH equals its REPLACE is not applied ("no change"); tc0 counted it as applied
 //  - every failure carries a reason, and writes to one path go through a queue
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, posix, relative, resolve, win32 } from "node:path";
 import { normalizeEol, parseBlocks, parseWholeFiles } from "./blocks.ts";
 
-export type FailReason = "not found" | "protected" | "bad path" | "too long";
+export const NO_CHANGE = "no change: SEARCH and REPLACE are identical";
+export type FailReason = "not found" | "protected" | "bad path" | "too long" | typeof NO_CHANGE;
 
 export interface BlockResult {
   path: string;
@@ -122,6 +124,13 @@ export function applyEdit(old: string, search: string, replace: string): string 
   return [...ol.slice(0, at), ...re, ...ol.slice(at + sl.length)].join("\n");
 }
 
+/** SEARCH and REPLACE say the same thing (line by line, ignoring trailing spaces): applying it would change nothing. */
+export function isNoopEdit(search: string, replace: string): boolean {
+  if (!search.trim()) return false; // an empty SEARCH creates or appends
+  const lines = (t: string) => t.split("\n").map((l) => l.trimEnd()).join("\n").trimEnd();
+  return lines(search) === lines(replace);
+}
+
 function setup(opts: ApplyOptions) {
   const prot = opts.protected == null ? null : new Set(opts.protected.map((p) => normpath(p.replace(/\\/g, "/"))));
   const out: ApplyResult = { applied: [], failed: [], results: [] };
@@ -155,6 +164,10 @@ async function runBlocks(
     const abs = safeResolve(opts.cwd, b.path);
     if (abs === null) {
       record({ path: b.path, kind, ok: false, reason: "bad path" });
+      continue;
+    }
+    if (isNoopEdit(b.search, b.replace)) {
+      record({ path: b.path, kind, ok: false, reason: NO_CHANGE });
       continue;
     }
     const r = await withFileMutationQueue(abs, async (): Promise<BlockResult> => {

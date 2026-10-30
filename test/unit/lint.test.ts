@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { autoFix, detectConfigured, findTool, lintPass, type ExecFn } from "../../src/lint.ts";
 
 const repo = (files: Record<string, string>) => {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-lint-"));
+  const d = tmpDir("tinycode-lint-");
   for (const [f, t] of Object.entries(files)) {
     mkdirSync(join(d, f, ".."), { recursive: true });
     writeFileSync(join(d, f), t);

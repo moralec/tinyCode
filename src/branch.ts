@@ -8,12 +8,12 @@ import type { Config } from "./config.ts";
 import { evidence, type Evidence } from "./context/evidence.ts";
 import { chat as realChat, type ChatOptions, type ChatResult, type Message } from "./llm.ts";
 import { MAX_TODO_CHARS, MAX_TODO_ITEMS, type Todo } from "./limits.ts";
-import { runTests } from "./testrun.ts";
+import { RESTORE_TOOL, type BestTree } from "./besttree.ts";
+import { parseCounts, runTests } from "./testrun.ts";
 
 export const BRANCH_SYSTEM =
-  "Answer a question about a code repository from the evidence given: a file outline and grep hits (path:line: text). " +
-  "Be short (one or two sentences). Cite the most relevant path:line. If the evidence does not answer it, say so and " +
-  "name the files most likely to.";
+  "Answer a repo question from the evidence: file outline, grep hits (path:line: text). 1-2 sentences. Cite best path:line. " +
+  "Evidence lacks answer: say so, name likely files.";
 
 export const ANSWER_SCHEMA = {
   type: "object",
@@ -58,15 +58,22 @@ export async function findAnswer(
   return formatAnswer(r.text);
 }
 
-export function registerBranchTools(pi: ExtensionAPI, cfg: Config): void {
+/** What the loop tools need to keep the best tree (src/besttree.ts): the state, the fs-backed snapshot and restore, and a signal that a best now exists (the tool set changes). */
+export interface BestHooks {
+  tree: BestTree;
+  snapshot(cwd: string): void;
+  restore(cwd: string): unknown;
+  onFirstBest(): void;
+}
+
+export function registerBranchTools(pi: ExtensionAPI, cfg: Config, best?: BestHooks): void {
   pi.registerTool(
     defineTool({
       name: "find",
       label: "Find",
-      description: "Ask where or how something is done in this repo; short answer with path:line.",
-      promptSnippet: "find: ask where/how something is in the repo; returns a short answer with path:line citations",
-      promptGuidelines: ["Use find to locate code instead of reading many files; then read only the cited files."],
-      parameters: Type.Object({ question: Type.String({ description: "The question about the code" }) }),
+      description: "Where/how is X in this repo: short answer with path:line.",
+      promptSnippet: "where/how is X in repo; path:line answer",
+      parameters: Type.Object({ question: Type.String() }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
         const cwd = (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
         let text: string;
@@ -83,17 +90,37 @@ export function registerBranchTools(pi: ExtensionAPI, cfg: Config): void {
     defineTool({
       name: "run_tests",
       label: "Run tests",
-      description: "Run the project's tests: PASS, or the failing tests and the first error.",
-      promptSnippet: "run_tests: run the tests; returns pass/fail, failing tests and the first error",
-      promptGuidelines: ["Use run_tests after each edit to check your work."],
+      description: "Run project tests: PASS, or failing tests and first error.",
+      promptSnippet: "run tests; PASS or failures",
       parameters: Type.Object({}),
       async execute(_id, _params, _signal, _onUpdate, ctx) {
         const cwd = (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
         const r = await runTests({ cwd, config: cfg.test });
-        return { content: [{ type: "text", text: r.text }], details: {} };
+        let text = r.text;
+        if (best) {
+          const had = best.tree.has;
+          const note = best.tree.observe(r.counts ?? parseCounts(r.text), () => best.snapshot(cwd), () => best.restore(cwd));
+          if (note) text += `\n${note}`;
+          if (!had && best.tree.has) best.onFirstBest();
+        }
+        return { content: [{ type: "text", text }], details: {} };
       },
     }),
   );
+  if (best) {
+    pi.registerTool(
+      defineTool({
+        name: RESTORE_TOOL,
+        label: "Restore best",
+        description: "Put files back to the best tree seen (most tests passing).",
+        parameters: Type.Object({}),
+        async execute(_id, _params, _signal, _onUpdate, ctx) {
+          const cwd = (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+          return { content: [{ type: "text", text: best.tree.restoreText(() => best.restore(cwd)) }], details: {} };
+        },
+      }),
+    );
+  }
 }
 
 /**
@@ -106,9 +133,8 @@ export function registerTodoTool(pi: ExtensionAPI, todo: Todo): void {
       name: "todo",
       label: "Todo",
       description:
-        `Only while you work with read/edit/bash: keep your steps (text, done) and notes (facts to keep); send the whole list. Max ${MAX_TODO_ITEMS} each, ${MAX_TODO_CHARS} chars.`,
-      promptSnippet: "todo: your running steps and notes, shown to you again every turn; send the whole list each time",
-      promptGuidelines: ["When you work with raw tools (read, edit, bash), keep your steps in todo and update it after each step. Never call todo before a tinyCode tool that fits the request."],
+        `Raw-tool work only: steps (text, done) and notes (facts to keep). Send whole list. Max ${MAX_TODO_ITEMS} each, ${MAX_TODO_CHARS} chars.`,
+      promptSnippet: "steps and notes, shown every turn; send whole list",
       parameters: Type.Object({
         steps: Type.Array(Type.Object({ text: Type.String(), done: Type.Optional(Type.Boolean()) })),
         notes: Type.Optional(Type.Array(Type.String())),

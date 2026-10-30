@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig } from "../../src/config.ts";
 import { chat as realChat, type ChatResult, type Message } from "../../src/llm.ts";
 import { runPlan, unfamiliarLibrary, wantsResearch } from "../../src/workflows/plan.ts";
 import { formatResearch, htmlToText, parseResearchArgs, runResearch, urlAllowed } from "../../src/workflows/research.ts";
 
 const TOKEN = "ghp_SECRETtoken1234567890";
-const tmp = () => mkdtempSync(join(tmpdir(), "tc-res-"));
+const tmp = () => tmpDir("tc-res-");
 const reply = (o: unknown, usage = { prompt_tokens: 100, cached_tokens: 0, completion_tokens: 20 }): ChatResult => ({
   text: typeof o === "string" ? o : JSON.stringify(o), usage, ms: 1, lane: "small", model: "m", fellBack: false,
 });

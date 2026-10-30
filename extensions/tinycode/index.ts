@@ -1,32 +1,40 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatAdaptive, readRuns } from "../../src/adaptive.ts";
-import { loadConfig, configPath, type Config } from "../../src/config.ts";
+import { loadConfig, configPath, type Config, type Lane } from "../../src/config.ts";
 import { findAnswer, registerBranchTools, registerTodoTool } from "../../src/branch.ts";
 import { chat, SESSION } from "../../src/llm.ts";
-import { MEMORY_PROMPT, createLimits, toolCallVerdict, withTail } from "../../src/limits.ts";
+import { createLimits, readCutMarker, sizeTokens, toolCallVerdict, usableTokens, withTail } from "../../src/limits.ts";
+import { buildNote, Checkpointer, milestoneOf, requestStart, requestText, touchedFiles } from "../../src/checkpoint.ts";
+import { parseCounts } from "../../src/testrun.ts";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { formatStats, logCall, logToolsFirst, readCalls } from "../../src/log.ts";
 import { makeIndexCache, route, type Routed } from "../../src/router.ts";
-import { agreement, asToolTurn, choose, DoneGuard, formatOrchestration, logDecision, logDirect, rateFor, readDecisions, readLog, resultMessage, runDirect, type DirectCall } from "../../src/orchestrate.ts";
+import { agreement, asToolTurn, choose, DoneGuard, dropDisplayOnly, formatOrchestration, logDecision, logDirect, rateFor, readDecisions, readLog, resultMessage, runDirect, scopeAfter, scopeBefore, targetOf, type DirectCall } from "../../src/orchestrate.ts";
 import { confirmFor, explicitlyAsked, isDev, modeState, parseDevArgs, setMode } from "../../src/mode.ts";
-import { CUSTOM_SAY, forTool, hintFor, todoFirst, isWorkflowTool, registerWorkflowTools, TOOLS_FIRST_PROMPT, ToolsFirst, type ToolOutcome, type ToolRunner, type WorkflowTool } from "../../src/tools.ts";
+import { CUSTOM_SAY, entersRawWork, forTool, intercepts, isWorkflowTool, registerWorkflowTools, ToolDiet, toolSet, ToolsFirst, triage, type ToolOutcome, type ToolRunner, type WorkflowTool } from "../../src/tools.ts";
+import { composePrompt } from "../../src/prompt.ts";
+import { BestTree, LOOP_SLOT, rewriteNudge } from "../../src/besttree.ts";
 import { endProgress, live, startProgress, uiSink } from "../../src/progress-ui.ts";
 import { createProgress, type Progress, type Summary } from "../../src/progress.ts";
 import { BUILD_PHASES, parseBuildArgs, runBuild } from "../../src/workflows/build.ts";
+import { Compactor } from "../../src/compact.ts";
+import { loadPrepareCompaction, runPiCompact } from "../../src/picompact.ts";
+import { compact as piCompact } from "@earendil-works/pi-coding-agent";
+import { wrongPathHint } from "../../src/pathhint.ts";
 import { ADD_PHASES, parseAddArgs, runAdd } from "../../src/workflows/add.ts";
 import { ASK_PHASES, parseAskArgs, runAsk } from "../../src/workflows/ask.ts";
 import { COMMIT_PHASES, parseCommitArgs, runCommit } from "../../src/workflows/commit.ts";
 import { EXPLAIN_PHASES, parseExplainArgs, runExplain } from "../../src/workflows/explain.ts";
 import { parseTestArgs, runTestGen, TEST_PHASES } from "../../src/workflows/testgen.ts";
-import { DOC_PHASES, docArgsFromText, parseDocArgs, readmeHeadings, runDoc, type DocArgs } from "../../src/workflows/doc.ts";
+import { DOC_PHASES, docArgsFromText, parseDocArgs, readmeHeadingLevels, runDoc, type DocArgs } from "../../src/workflows/doc.ts";
 import { findReadme, README_PHASES, README_UPDATE_PHASES } from "../../src/workflows/docreadme.ts";
 import { EDIT_PHASES, parseEditArgs, runEdit } from "../../src/workflows/edit.ts";
 import { PLAN_PHASES, parsePlanArgs, runPlan } from "../../src/workflows/plan.ts";
 import { formatResearch, parseResearchArgs, RESEARCH_PHASES, runResearch } from "../../src/workflows/research.ts";
 import { parseReviewArgs, REVIEW_PHASES, runReview } from "../../src/workflows/review.ts";
-import { FIX_PHASES, parseFixArgs, runFix, undoFix, type PiHandoff } from "../../src/workflows/fix.ts";
+import { FIX_PHASES, handoverText, parseFixArgs, restoreSnapshot, runFix, takeSnapshot, undoFix, type PiHandoff } from "../../src/workflows/fix.ts";
 
 const DEFAULT_CONTEXT_WINDOW = 32768; // used when a lane sets no contextWindow
 
@@ -43,7 +51,7 @@ export default function (pi: ExtensionAPI) {
   setMode(cfg.mode);
 
   // One provider "tinycode"; one model per distinct local lane model (all lanes share the door baseUrl in defaults).
-  const seen = new Map<string, { baseUrl: string; model: string; contextWindow?: number }>();
+  const seen = new Map<string, Lane>();
   for (const lane of Object.values(cfg.lanes)) if (lane && !lane.apiKeyEnv && !seen.has(lane.model)) seen.set(lane.model, lane);
   const first = [...seen.values()][0];
   if (first) {
@@ -58,17 +66,23 @@ export default function (pi: ExtensionAPI) {
         reasoning: false,
         input: ["text" as const],
         contextWindow: l.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-        maxTokens: 4096,
+        maxTokens: l.maxTokens ?? 4096,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        samplingParams: { temperature: 0, chat_template_kwargs: { enable_thinking: false } },
+        samplingParams: { temperature: l.temperature ?? 0, ...(l.seed !== undefined ? { seed: l.seed } : {}), chat_template_kwargs: { enable_thinking: false } },
         compat: { supportsDeveloperRole: false, supportsStore: false, supportsReasoningEffort: false, maxTokensField: "max_tokens" as const },
         ...(l.baseUrl !== first.baseUrl ? { baseUrl: l.baseUrl } : {}),
       })),
     });
   }
 
-  registerBranchTools(pi, cfg);
-  const loop = wireLimits(pi, cfg);
+  const tm = toolManager(pi, cfg.limits.stuckTestRuns, cfg.limits.autoContinue);
+  registerBranchTools(pi, cfg, {
+    tree: tm.best,
+    snapshot: (cwd) => void takeSnapshot(cwd, process.env, LOOP_SLOT),
+    restore: (cwd) => restoreSnapshot(cwd, process.env, LOOP_SLOT),
+    onFirstBest: () => tm.sync(),
+  });
+  const loop = wireLimits(pi, cfg, tm);
   registerFix(pi, cfg, loop);
   registerEdit(pi, cfg, loop);
   registerAdd(pi, cfg, loop);
@@ -97,6 +111,9 @@ export default function (pi: ExtensionAPI) {
   });
 }
 
+/** the "tests still fail, continue" message tinyCode adds when the model stops early (it is model context) */
+const CUSTOM_CONTINUE = "tinycode-continue";
+
 /** /dev on|off: dev mode for this session (shows the stuck confirm, the router hint, events, per-call tokens). */
 function registerDev(pi: ExtensionAPI): void {
   pi.registerCommand("dev", {
@@ -110,12 +127,77 @@ function registerDev(pi: ExtensionAPI): void {
   });
 }
 
+/**
+ * Which tools the model sees (src/tools.ts `toolSet`): Pi's active set at the start of the request, cut to the loop tools
+ * once the request is in raw-tool work (the diet), plus `restore_best` once a best tree exists. Every call is safe: an
+ * older Pi without the tool-set API simply keeps all tools.
+ */
+function toolManager(pi: ExtensionAPI, stuckTestRuns: number, autoContinue: number) {
+  const best = new BestTree(stuckTestRuns, autoContinue);
+  const diet = new ToolDiet();
+  let baseline: string[] | null = null;
+  const sync = (): void => {
+    try {
+      if (!baseline) return;
+      const want = toolSet(baseline, { diet: diet.on, best: best.has });
+      const cur = pi.getActiveTools();
+      if (want.length !== cur.length || want.some((n, i) => n !== cur[i])) pi.setActiveTools(want);
+    } catch {
+      // no tool-set API: all tools stay
+    }
+  };
+  const read = (): string[] | null => {
+    try {
+      return pi.getActiveTools();
+    } catch {
+      return null;
+    }
+  };
+  return {
+    best,
+    diet,
+    sync,
+    /** a new user request: Pi's active set is the new baseline, no diet, no best tree */
+    newRequest(): void {
+      if (!diet.on) baseline = read() ?? baseline;
+      diet.leave();
+      best.reset();
+      sync();
+    },
+    /** the request is in raw-tool work */
+    enterRaw(): void {
+      if (!diet.enter()) return;
+      baseline ??= read();
+      sync();
+    },
+  };
+}
+
 /** Pi-loop limits (S4): repeat guard, view cap, result cap, batched masking, turn cap, per-turn call log. */
-function wireLimits(pi: ExtensionAPI, cfg: Config): LoopControl {
+function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolManager>): LoopControl {
   const lim = createLimits(cfg.limits, SESSION);
+  const compactor = new Compactor(cfg.limits.compactAt);
+  // milestone checkpoints (src/checkpoint.ts): a successful edit/write since the last test run, and that run's text
+  const ckpt = new Checkpointer(cfg.limits.checkpointAt, cfg.limits.checkpointMinSave, cfg.limits.checkpointGap);
+  let editedSinceTests = false;
+  let lastTestText = "";
   const loopLane = cfg.steps.loop.lane;
   registerTodoTool(pi, lim.todo);
-  const ctl: LoopControl = { nextTurnCap: undefined, started: undefined, ended: undefined, turns: () => lim.turns.count, runTool: undefined };
+  const ctl: LoopControl = {
+    nextTurnCap: undefined,
+    started: undefined,
+    ended: undefined,
+    turns: () => lim.turns.count,
+    runTool: undefined,
+    onHandoff: (h, changed, cwd) => {
+      // a hand-over: the files the workflow wrote are read whole once, and its tree is the loop's first best
+      for (const f of changed) lim.fresh.add(f);
+      tm.best.seed(h.tree, () => void takeSnapshot(cwd, process.env, LOOP_SLOT));
+      tm.sync();
+    },
+  };
+  const wholeReads = new Set<string>();
+  const rewrites = new Set<string>();
 
   // Plain chat gets the same progress as a workflow (status line, checklist from the model's todo, calls, tokens, cache %).
   // Inside a workflow's rung 3 the workflow's own progress is live: the loop feeds its todo and its calls into that one.
@@ -166,10 +248,14 @@ function wireLimits(pi: ExtensionAPI, cfg: Config): LoopControl {
   let plan: { text: string; call: DirectCall; r: Routed } | null = null;
   // the router's tool for a code-decided request the model chooses for: its first call is compared with it
   let agree: { request: string; tool: string | null } | null = null;
+  // config `intercept`: this request went to a workflow tinyCode does not take over (plain Pi), and whether the model
+  // changed a file in it; such a request gets the "tests still fail, continue" follow-up only after its own edit
+  let plain = false;
+  let edited = false;
   const modelId = (ctx: ExtensionContext | undefined): string => ctx?.model?.id ?? "";
   const routeOnce = async (text: string, cwd: string): Promise<Routed> => {
     if (routedOnce?.text === text) return routedOnce.r;
-    const r = await route(text, indexFor(cwd), chat);
+    const r = await route(text, indexFor(cwd), chat, cfg.route.model);
     routedOnce = { text, r };
     return r;
   };
@@ -185,7 +271,8 @@ function wireLimits(pi: ExtensionAPI, cfg: Config): LoopControl {
     try {
       const r = await routeOnce(text, ctx.cwd);
       const rate = cfg.orchestration.learn ? rateFor(cfg.orchestration, modelId(ctx), readDecisions()) : null;
-      const ch = choose(cfg.orchestration, r, rate);
+      // config `intercept`: a workflow tinyCode does not take over is never run directly (plain Pi gets the request)
+      const ch = choose(cfg.orchestration, r, rate, cfg.intercept);
       if (ch.direct) plan = { text, call: ch.direct, r };
     } catch {
       plan = null;
@@ -193,22 +280,45 @@ function wireLimits(pi: ExtensionAPI, cfg: Config): LoopControl {
     return { action: "continue" as const };
   });
   pi.on("before_agent_start", async (e, ctx) => {
-    const systemPrompt = `${e.systemPrompt}\n\n${TOOLS_FIRST_PROMPT}\n\n${MEMORY_PROMPT}`;
+    // the tools-first line names only the intercepted workflow tools (config `intercept`)
+    const systemPrompt = composePrompt(e.systemPrompt, cfg.limits.scriptLines, cfg.intercept);
     const text = String((e as { prompt?: string }).prompt ?? "").trim();
     if (text && !insideWorkflow()) modeState.lastPrompt = text;
     // not for a workflow's own hand-off (rung 3), not for slash commands, not for an empty prompt
     if (!text || text.startsWith("/") || insideWorkflow()) return { systemPrompt };
     doneGuard.reset();
     agree = null;
+    plain = false;
+    edited = false;
+    lim.fresh.clear();
+    wholeReads.clear();
+    rewrites.clear();
+    tm.newRequest();
+    ckpt.reset();
+    editedSinceTests = false;
+    lastTestText = "";
     if (plan && plan.text === text && ctl.runTool) {
       // router confident: tinyCode runs the workflow; the model said one sentence before and reports after (its turn starts next)
       const p = plan;
       plan = null;
       nudgeTodo = false;
       first.start(text, null, { source: p.r.source, tokens: p.r.prompt_tokens + p.r.completion_tokens, ms: p.r.ms });
-      const res = await runDirect({ chat, show: (s) => showSay(ctx, s), run: (c) => ctl.runTool!(c.tool, c.params, ctx) }, text, p.call);
-      doneGuard.record(res.call.tool, res.status);
-      logDirect({ model: modelId(ctx), tool: res.call.tool, status: res.status, say_source: res.said.source, say_tokens: res.said.tokens, say_ms: res.said.ms, request: text.replace(/\s+/g, " ").slice(0, 160) });
+      // the request's named files and `names`, checked after the run: a run that left some alone is partial, not done
+      const read = (f: string): string | null => {
+        try {
+          return readFileSync(resolve(ctx.cwd, f), "utf8");
+        } catch {
+          return null;
+        }
+      };
+      const scope = () => {
+        const b = scopeBefore(text, indexFor(ctx.cwd).files, read);
+        return () => scopeAfter(b, indexFor(ctx.cwd).files, read);
+      };
+      const res = await runDirect({ show: (s) => showSay(ctx, s), run: (c) => ctl.runTool!(c.tool, c.params, ctx), scope }, p.call);
+      doneGuard.record(res.call.tool, res.status, targetOf(res.call.params));
+      if (entersRawWork({ tool: res.call.tool, text: res.text })) tm.enterRaw();
+      logDirect({ model: modelId(ctx), tool: res.call.tool, status: res.status, request: text.replace(/\s+/g, " ").slice(0, 160) });
       return { systemPrompt, message: resultMessage(res) };
     }
     plan = null;
@@ -219,10 +329,13 @@ function wireLimits(pi: ExtensionAPI, cfg: Config): LoopControl {
       // the router's full path: code first, the small-lane call only when code is unsure (src/router.ts)
       try {
         const r = await routeOnce(text, ctx.cwd);
-        hint = hintFor(r);
-        nudgeTodo = todoFirst(r);
+        // config `intercept`: a workflow tinyCode does not take over is "no workflow": no hint line, no todo nudge, no agreement record
+        const t = triage(r, cfg.intercept);
+        plain = !intercepts(cfg.intercept, r);
+        hint = t.hint;
+        nudgeTodo = t.nudgeTodo;
         cost = { source: r.source, tokens: r.prompt_tokens + r.completion_tokens, ms: r.ms };
-        if (r.source === "code" && r.confident) agree = { request: text, tool: hint.tool };
+        if (hint && r.source === "code" && r.confident) agree = { request: text, tool: hint.tool };
       } catch {
         hint = null;
       }
@@ -245,6 +358,19 @@ function wireLimits(pi: ExtensionAPI, cfg: Config): LoopControl {
     ctl.ended?.();
   });
 
+  // The model stopped with failing tests: one continuation, as a user would type it (src/besttree.ts continueLine).
+  // agent_before_settle is Pi's hook for "one last continuation"; a sendUserMessage at agent_end was dropped (connect on
+  // c35db37: no follow-up). The continuation has no prompt, so before_agent_start does not treat it as a new request.
+  pi.on("agent_before_settle", (e, ctx) => {
+    if (e.outcome !== "completed" || insideWorkflow()) return undefined;
+    // a plain request (not intercepted) that only looked at failing tests (explain, review) is not told to continue
+    const more = plain && !edited ? null : tm.best.continueLine();
+    if (more) return { entries: [{ type: "custom_message" as const, customType: CUSTOM_CONTINUE, content: more, display: true }], continue: true };
+    // ending for good: never below the best tree (src/besttree.ts endRestore)
+    const back = tm.best.endRestore(() => restoreSnapshot(ctx.cwd, process.env, LOOP_SLOT));
+    return back ? { entries: [{ type: "custom_message" as const, customType: CUSTOM_CONTINUE, content: back, display: true }] } : undefined;
+  });
+
   pi.on("turn_end", () => {
     sync();
   });
@@ -257,9 +383,9 @@ function wireLimits(pi: ExtensionAPI, cfg: Config): LoopControl {
 
   pi.on("tool_call", (e, ctx) => {
     // Rung 3 of a workflow is Pi's loop: it must not call a workflow tool again (that would nest a run inside a run).
-    if (ctl.nextTurnCap !== undefined && isWorkflowTool(e.toolName)) return { block: true, reason: "You are already inside a tinyCode workflow's last step: use read, edit, write, bash, find and run_tests." };
-    // A workflow tinyCode ran for this request with STATUS: done is not run again (a refusal the model reads, never an abort).
-    const again = isWorkflowTool(e.toolName) ? doneGuard.check(e.toolName) : null;
+    if (ctl.nextTurnCap !== undefined && isWorkflowTool(e.toolName)) return { block: true, reason: "In workflow loop. Use read, edit, write, bash, find, run_tests only." };
+    // A workflow tinyCode ran for this request with STATUS: done is not run again on the same target (a refusal the model reads, never an abort).
+    const again = isWorkflowTool(e.toolName) ? doneGuard.check(e.toolName, targetOf(e.input)) : null;
     if (again) return { block: true, reason: again };
     // The tools-first nudge (rule 14: one tail line, never a block).
     const nudge = first.onCall(e.toolName);
@@ -271,6 +397,11 @@ function wireLimits(pi: ExtensionAPI, cfg: Config): LoopControl {
       agree = null;
     }
     if (isDev() && ctx.hasUI && firstRec) ctx.ui.notify(`dev: tools-first ${firstRec.tools_first} (first call ${firstRec.first}, hint ${firstRec.hint ?? "none"}${nudge ? ", nudged" : ""})`, "info");
+    if (!insideWorkflow() && entersRawWork({ call: e.toolName })) tm.enterRaw();
+    if (e.toolName === "write") {
+      const target = resolve(ctx.cwd, String((e.input as Record<string, unknown>).path ?? (e.input as Record<string, unknown>).file_path ?? ""));
+      if (rewriteNudge("write", existsSync(target), tm.best.has)) rewrites.add(e.toolCallId);
+    }
     const v = toolCallVerdict(lim, cfg.limits, e.toolName, e.input as Record<string, unknown>, {
       resolvePath: (p) => resolve(ctx.cwd, p),
       windowHash: (p, offset, limit) => {
@@ -281,30 +412,166 @@ function wireLimits(pi: ExtensionAPI, cfg: Config): LoopControl {
           return "missing"; // unreadable: let Pi report the error
         }
       },
+      lineCount: (p) => {
+        try {
+          return readFileSync(p, "utf8").split("\n").length;
+        } catch {
+          return -1;
+        }
+      },
     });
+    if (v.action === "allow" && v.whole) wholeReads.add(e.toolCallId);
     return v.action === "allow" ? undefined : { block: true, reason: v.reason };
   });
 
-  pi.on("tool_result", (e) => {
+  pi.on("tool_result", (e, ctx) => {
     lim.guard.result(e.toolName, e.input, e.isError);
     if (e.toolName === "todo") sync();
-    else if (!e.isError && (e.toolName === "edit" || e.toolName === "write")) shown()?.touch(String(e.input.path ?? e.input.file_path ?? ""));
+    else if (!e.isError && (e.toolName === "edit" || e.toolName === "write")) {
+      edited = true;
+      editedSinceTests = true;
+      shown()?.touch(String(e.input.path ?? e.input.file_path ?? ""));
+    }
     const parts = e.content.filter((p) => p.type === "text") as { type: "text"; text: string }[];
+    if (e.toolName === "run_tests") {
+      // a milestone (src/checkpoint.ts): the best tree has already seen this run (src/branch.ts run_tests)
+      lastTestText = parts.map((p) => p.text).join("");
+      ckpt.tests(milestoneOf(tm.best.verdict, editedSinceTests, parseCounts(lastTestText)), e.toolCallId);
+      editedSinceTests = false;
+    }
     if (parts.length !== e.content.length || !parts.length) return undefined;
-    const capped = lim.cap(parts.map((p) => p.text).join(""));
-    return capped === null ? undefined : { content: [{ type: "text" as const, text: capped }] };
+    let text = parts.map((p) => p.text).join("");
+    // a workflow tool that did not finish (no STATUS: done): the model carries on with raw tools, so the tool diet starts
+    if (!insideWorkflow() && entersRawWork({ tool: e.toolName, text })) tm.enterRaw();
+    let changed = false;
+    // a read that stops early says so in one explicit line (a cut file must not read as a finished one)
+    const cut = e.toolName === "read" && !e.isError ? readCutMarker(text, e.input) : null;
+    if (cut !== null) {
+      text = cut;
+      changed = true;
+    }
+    // a mistyped project path: say where the project is and which file was meant (src/pathhint.ts)
+    const hint = wrongPathHint(ctx.cwd, e.toolName, e.input, e.isError, text);
+    if (hint) {
+      text += `\n${hint}`;
+      changed = true;
+    }
+    // a whole-file rewrite once tests pass: a nudge, never a block
+    if (rewrites.delete(e.toolCallId) && !e.isError) {
+      text += `\n${rewriteNudge("write", true, true)}`;
+      changed = true;
+    }
+    const capped = wholeReads.delete(e.toolCallId) ? null : lim.cap(text);
+    return capped === null && !changed ? undefined : { content: [{ type: "text" as const, text: capped ?? text }] };
+  });
+
+  // Pi's own compaction, sized for the window (src/picompact.ts, F7): cancelled while tinyCode's masking can still
+  // handle the context; over the line, redone with window-sized keep/reserve so it ends well below the trigger.
+  pi.on("session_before_compact", async (e, ctx) => {
+    const m = ctx.model;
+    const started = Date.now();
+    const out = await runPiCompact({
+      windowTokens: m?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      reason: e.reason,
+      tokensBefore: e.preparation.tokensBefore,
+      reserveShare: cfg.limits.piCompactReserve,
+      keepShare: cfg.limits.piKeepRecent,
+      ceilingTokens: usableTokens(m?.contextWindow ?? DEFAULT_CONTEXT_WINDOW, cfg.limits.outputReserve),
+      selfManaged: cfg.limits.checkpointAt > 0,
+      branchEntries: e.branchEntries,
+      deps: async () => {
+        if (!m) throw new Error("no model selected");
+        const prepare = await loadPrepareCompaction();
+        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
+        if (!auth.ok) throw new Error(`no auth for ${m.provider}/${m.id}: ${auth.error}`);
+        const model = auth.baseUrl ? { ...m, baseUrl: auth.baseUrl } : m;
+        return { prepare, compact: (prep) => piCompact(prep as never, model, auth.apiKey, auth.headers as never, e.customInstructions, e.signal, undefined, undefined, auth.env) as never };
+      },
+    });
+    logCall({
+      ts: new Date().toISOString(),
+      session: SESSION,
+      workflow: "pi",
+      step: "pi_compact",
+      lane: loopLane,
+      model: m?.id ?? "",
+      prompt_tokens: out.tokensBefore,
+      cached_tokens: 0,
+      completion_tokens: out.summaryTokens,
+      ms: Date.now() - started,
+      status: out.status,
+    });
+    if (out.why) process.stderr.write(`tinyCode: pi_compact ${out.status === "passed" ? "passed to Pi" : "cancelled"} (${out.why})\n`);
+    if (out.status === "resized" && ctx.hasUI) ctx.ui.notify(`tinyCode: compacted Pi's context at window size: ${out.tokensBefore} tokens before, summary ${out.summaryTokens} tokens`, "info");
+    return out.result as never;
   });
 
   pi.on("context", (e, ctx) => {
     // a direct run's result is shown to the model as its own tool's output (assistant sentence + tool call + tool result)
     const m = ctx.model;
-    const turned = m ? (asToolTurn(e.messages as never, { id: m.id, provider: m.provider, api: m.api }) as typeof e.messages | undefined) : undefined;
-    const messages = turned ?? e.messages;
-    const masked = lim.mask(messages as never);
+    const turned0 = m ? (asToolTurn(e.messages as never, { id: m.id, provider: m.provider, api: m.api }) as typeof e.messages | undefined) : undefined;
+    // heartbeats and stuck lines are for the human only
+    const shown = dropDisplayOnly((turned0 ?? e.messages) as never) as typeof e.messages;
+    const turned = shown !== (turned0 ?? e.messages) ? shown : turned0;
+    // compaction (src/compact.ts): over limits.compactAt of the window, finished requests become one note each (batched)
+    let system = 0;
+    try {
+      system = String(ctx.getSystemPrompt?.() ?? "").length;
+    } catch {
+      system = 0;
+    }
+    const folded = compactor.apply((turned ?? e.messages) as never, m?.contextWindow ?? DEFAULT_CONTEXT_WINDOW, system) as typeof e.messages | undefined;
+    if (compactor.last && ctx.hasUI) ctx.ui.notify(`tinyCode: compacted ${compactor.last.folded} finished request(s): context ${compactor.last.tokensBefore} -> ${compactor.last.tokensAfter} tokens`, "info");
+    const unchecked = folded ?? turned ?? e.messages;
+    const window = m?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+    const usable = usableTokens(window, cfg.limits.outputReserve);
+    // milestone checkpoints (src/checkpoint.ts): at a milestone, what lies between the request and the milestone's turn
+    // becomes one note; over the usable line the last turn is the cut (backstop). Stepped back: no new milestone ones.
+    const checked = ckpt.apply(unchecked as never, {
+      windowTokens: window,
+      systemChars: system,
+      usableTokens: usable,
+      milestones: !lim.stepped,
+      view: (ms) => (lim.stepped ? ms : (lim.masker.view(ms as never) as never)),
+      note: (showTests) => {
+        const msgs = unchecked as never as Parameters<typeof touchedFiles>[0];
+        const req = requestStart(msgs);
+        return buildNote({
+          // a Pi summary at the head already states the goal: no Task line from it
+          request: msgs[req]?.role === "user" ? requestText(msgs[req]) : "",
+          best: tm.best.best,
+          bestRun: tm.best.bestRunNo,
+          last: tm.best.lastCounts,
+          lastText: lastTestText,
+          showTests,
+          files: touchedFiles(msgs.slice(Math.max(0, req)), ctx.cwd),
+          steps: lim.todo.steps,
+          notes: lim.todo.notes,
+        });
+      },
+    }) as typeof e.messages | undefined;
+    const cp = ckpt.last;
+    if (cp) {
+      lim.reads.reset(); // the reads are gone from what the model sees: a re-read is served
+      logCall({ ts: new Date().toISOString(), session: SESSION, workflow: "pi", step: "checkpoint", lane: "", model: "", prompt_tokens: cp.tokensBefore, cached_tokens: 0, completion_tokens: 0, ms: 0, status: `${cp.kind}: ${cp.tokensBefore} -> ${cp.tokensAfter} tokens (${cp.removed} messages, note ${cp.noteChars} chars)` });
+      if (ctx.hasUI) ctx.ui.notify(`tinyCode: checkpoint (${cp.kind}): context ${cp.tokensBefore} -> ${cp.tokensAfter} tokens`, "info");
+    }
+    const messages = checked ?? unchecked;
+    // pressure masking (src/limits.ts): over limits.pressureAt of the window (never above the usable line), old results,
+    // long call arguments and long replies are masked (batched). The size counts characters too (sizeTokens), and a kept
+    // reply's stale usage is zeroed by the checkpoint, so this also catches what a cut could not take out.
+    const pressure = { windowTokens: window, systemChars: system, ceilingTokens: usable };
+    let masked = lim.mask(messages as never, pressure);
+    // never send a request over the usable line unmasked, not even stepped back (then masking is otherwise off)
+    if (lim.stepped && usable > 0 && sizeTokens(messages as never, system) > usable) masked = lim.masker.apply(messages as never, pressure);
+    const left = sizeTokens((masked ?? messages) as never, system);
+    if (usable > 0 && left > usable)
+      logCall({ ts: new Date().toISOString(), session: SESSION, workflow: "pi", step: "over_line", lane: "", model: "", prompt_tokens: left, cached_tokens: 0, completion_tokens: 0, ms: 0, status: `${left} tokens after checkpoint and masking, usable ${usable}` });
+    const pressed = lim.masker.lastPressure;
+    if (pressed && ctx.hasUI) ctx.ui.notify(`tinyCode: context pressure, masked ${pressed.results} old result(s) and ${pressed.calls} old reply(ies): ${pressed.tokensBefore} -> ${pressed.tokensAfter} tokens`, "info");
     // S4b: the todo and notes go last, as a user message (tail only: the prefix and the cache stay as they were).
-    const out = withTail(masked ?? (messages as never), lim.todo, lim.outputLimitHit, lim.tailNotes.splice(0), nudgeTodo) ?? masked;
-    if (out) return { messages: out as never };
-    return turned ? { messages: turned } : undefined;
+    const out = withTail(masked ?? (messages as never), lim.todo, lim.outputLimitHit, lim.tailNotes.splice(0), nudgeTodo) ?? masked ?? (checked || folded || turned ? (messages as never) : undefined);
+    return out ? { messages: out as never } : undefined;
   });
 
   pi.on("message_end", (e, ctx) => {
@@ -354,6 +621,8 @@ interface LoopControl {
   turns: () => number;
   /** the workflow tools' runner (set by registerTools): tinyCode's direct runs use the same one */
   runTool: ToolRunner | undefined;
+  /** a hand-over to Pi's loop: the files the workflow changed (absolute) and its tree's counts (src/besttree.ts) */
+  onHandoff: (h: PiHandoff, changed: string[], cwd: string) => void;
 }
 
 const START_WAIT_MS = 60_000;
@@ -373,6 +642,8 @@ interface ToolCapture {
   text: string;
   ok: boolean;
   handoff: string | null;
+  /** ok but unfinished: what remains (STATUS: partial) */
+  remaining?: string;
 }
 const newCapture = (): ToolCapture => ({ lines: [], text: "", ok: true, handoff: null });
 
@@ -401,16 +672,16 @@ async function tracked<T>(
   try {
     const r = await body({ pg, chat: pg.chat(chat), report });
     const sum = summarize(r, pg);
-    const text = pg.done(sum);
+    pg.done(sum);
     if (tool) {
-      tool.text = text;
+      tool.text = pg.summary(sum, true);
       tool.ok = (sum.outcome ?? "done") === "done";
     }
     return r;
   } catch (e) {
-    const text = pg.fail((e as Error).message);
+    pg.fail((e as Error).message);
     if (tool) {
-      tool.text = text;
+      tool.text = pg.summary({ outcome: "failed", reason: (e as Error).message }, true);
       tool.ok = false;
     }
     return undefined;
@@ -424,8 +695,14 @@ const inlineHandoff = (tool: ToolCapture) => async (h: PiHandoff): Promise<{ tur
   tool.handoff = h.text;
   return { turns: 0 };
 };
-const handoffFor = (pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, loop: LoopControl, r: Run, tool?: ToolCapture) =>
-  cfg.ladder.rung3 ? (tool ? inlineHandoff(tool) : makeHandoff(pi, cfg, ctx, loop, r.report)) : undefined;
+const handoffFor = (pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, loop: LoopControl, r: Run, tool?: ToolCapture) => {
+  if (!cfg.ladder.rung3) return undefined;
+  const inner = tool ? inlineHandoff(tool) : makeHandoff(pi, cfg, ctx, loop, r.report);
+  return async (h: PiHandoff): Promise<{ turns: number }> => {
+    loop.onHandoff(h, r.pg.changed.map((f) => resolve(ctx.cwd, f)), ctx.cwd);
+    return inner(h);
+  };
+};
 
 const noFiles = (pg: Progress): string[] => pg.changed;
 
@@ -461,8 +738,10 @@ function runFixTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, loo
     pi, cfg, ctx, "fix", FIX_PHASES,
     (r) => runFix(args, { cwd: ctx.cwd, config: cfg, chat: r.chat, progress: r.pg, pi: handoffFor(pi, cfg, ctx, loop, r, tool), report: r.report }),
     (f, pg) =>
-      f.solvedBy === "none"
-        ? { outcome: "blocked", reason: `no rung solved it${f.diagnosis ? ` (${f.diagnosis.split("\n")[0]})` : ""}`, files: noFiles(pg), next: "/fix --undo to revert, or give more detail and run /fix again" }
+      f.notReproduced
+        ? { outcome: "blocked", reason: `couldn't reproduce: behaviour already works (test: ${f.notReproduced.test}); test undone, nothing changed`, files: noFiles(pg) }
+        : f.solvedBy === "none"
+        ? { outcome: "blocked", reason: f.kept ? "no rung solved it; best tree kept" : "no rung solved it", files: noFiles(pg), next: "/fix --undo to revert, or more detail and /fix again" }
         : { text: `solved by ${f.solvedBy}`, files: noFiles(pg), next: "/fix --undo to revert" },
     tool,
   );
@@ -550,7 +829,7 @@ function registerEdit(pi: ExtensionAPI, cfg: Config, loop: LoopControl): void {
         // auto mode hands over without asking; dev mode asks
         const ask = confirmFor(ctx);
         const yes = ask ? await ask(`Hand ${a.path} to /fix (the ladder, then Pi's loop)?`) : false;
-        if (yes) await runFixTracked(pi, cfg, ctx, loop, { test: a.test, undo: false, task: `In ${a.path}: ${a.instruction}` });
+        if (yes) await runFixTracked(pi, cfg, ctx, loop, { test: a.test, undo: false, reproduce: false, task: `In ${a.path}: ${a.instruction}` });
       }
     },
   });
@@ -563,7 +842,7 @@ function runEditTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, a:
     (e, pg) =>
       e.ok
         ? { text: `edited ${a.path}`, files: noFiles(pg), next: "/fix --undo does not cover /edit; review with git diff" }
-        : { outcome: "failed", reason: e.unavailable ?? `could not edit ${a.path}; it was restored`, next: e.offerFix ? (tool ? "use fix with the same task, or edit the file yourself" : "/fix with the same task (the ladder, then Pi's loop)") : undefined },
+        : { outcome: "failed", reason: e.unavailable ?? `could not edit ${a.path}; it was restored`, next: e.offerFix ? (tool ? "fix with same task, or edit by hand" : "/fix with the same task (the ladder, then Pi's loop)") : undefined },
     tool,
   );
 }
@@ -590,7 +869,9 @@ function runAddTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, loo
     (a, pg) =>
       a.ok
         ? { text: a.target ? `added to ${a.target}${a.test ? ` with ${a.test}` : ""}` : "added", files: a.files.length ? a.files : noFiles(pg), next: "/fix --undo to revert" }
-        : { outcome: "failed", reason: a.target ? `the test for the new code in ${a.target} does not pass` : "no file was changed", files: noFiles(pg), next: "/fix --undo to revert" },
+        : a.undone
+          ? { outcome: "failed", reason: `${a.undone.why}; /add undid its changes`, files: noFiles(pg) }
+          : { outcome: "failed", reason: a.target ? `test for new code in ${a.target} fails` : "no file was changed", files: noFiles(pg), next: "/fix --undo to revert" },
     tool,
   );
 }
@@ -645,13 +926,15 @@ function registerCommit(pi: ExtensionAPI, cfg: Config): void {
 function runCommitTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, args: Parameters<typeof runCommit>[0], tool?: ToolCapture) {
   return tracked(
     pi, cfg, ctx, "commit", COMMIT_PHASES,
-    (r) => runCommit(args, { cwd: ctx.cwd, config: cfg, chat: r.chat, progress: r.pg, report: r.report, confirm: confirmFor(ctx, { kind: "commit", explicit: tool ? explicitlyAsked("commit", modeState.lastPrompt) : true }) }),
+    (r) => runCommit(args, { cwd: ctx.cwd, config: cfg, chat: r.chat, progress: r.pg, report: r.report, confirm: confirmFor(ctx, { kind: "commit", explicit: tool ? explicitlyAsked("commit", modeState.lastPrompt) : true, fromTool: tool !== undefined }) }),
     (c) => {
       const first = c.message.split("\n")[0] ?? "";
       if (c.outcome === "committed") return { text: `committed: ${first}`, next: "git revert HEAD to undo" };
       if (c.outcome === "nothing") return { text: "nothing to commit" };
-      if (c.outcome === "declined") return { outcome: "blocked", reason: "not committed (declined)", next: "stage what you want and run /commit again" };
-      return { outcome: "failed", reason: c.outcome === "refused" ? "the model's message was refused twice; nothing committed" : "git failed; nothing committed" };
+      if (c.outcome === "declined") return tool && !explicitlyAsked("commit", modeState.lastPrompt)
+        ? { outcome: "blocked", reason: "not committed: the user did not ask for a commit", next: "report the result; no commit" }
+        : { outcome: "blocked", reason: "not committed (declined)", next: "stage what you want, /commit again" };
+      return { outcome: "failed", reason: c.outcome === "refused" ? "message refused twice; nothing committed" : "git failed; nothing committed" };
     },
     tool,
   );
@@ -668,15 +951,18 @@ function registerDoc(pi: ExtensionAPI, cfg: Config): void {
 }
 
 /** /doc through the progress system: shared by the command and by routing. */
-function runDocTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, args: DocArgs, tool?: ToolCapture) {
+async function runDocTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, args: DocArgs, tool?: ToolCapture) {
   const readme = args.mode === "readme";
   const name = readme ? "doc readme" : "doc";
   const phases = !readme ? DOC_PHASES : args.readme.update ? README_UPDATE_PHASES : README_PHASES;
-  return tracked(
+  const v = await tracked(
     pi, cfg, ctx, name, phases,
-    (r) => runDoc(args, { cwd: ctx.cwd, config: cfg, chat: r.chat, progress: r.pg, report: r.report, confirm: confirmFor(ctx, { kind: "readme-rewrite", explicit: tool ? explicitlyAsked("readme-rewrite", modeState.lastPrompt) : args.mode === "readme" && !args.readme.ask }) }),
+    (r) => runDoc(args, { cwd: ctx.cwd, config: cfg, chat: r.chat, progress: r.pg, report: r.report, confirm: confirmFor(ctx, { kind: "readme-rewrite", explicit: tool ? explicitlyAsked("readme-rewrite", modeState.lastPrompt) : args.mode === "readme" && !args.readme.ask, fromTool: tool !== undefined }) }),
     (d, pg) => {
-      if (d.mode === "comments") return d.ok ? { text: d.changed ? `documented ${d.documented.length} symbol(s) in ${d.file}` : `nothing to change in ${d.file}`, files: d.changed ? [d.file ?? ""] : [], next: d.changed ? "review with git diff" : undefined } : { outcome: "failed", reason: d.reason ?? "no change" };
+      if (d.mode === "comments") {
+        const where = (d.files?.length ? d.files : [d.file ?? ""]).join(", ");
+        return d.ok ? { text: d.changed ? `documented ${d.documented.length} symbol(s) in ${where}` : `nothing to change in ${where}`, files: d.changed ? (d.files ?? [d.file ?? ""]) : [], next: d.changed ? "review with git diff" : undefined } : { outcome: "failed", reason: d.reason ?? "no change" };
+      }
       if (!d.ok) return { outcome: d.reason === "declined" ? "blocked" : "failed", reason: d.reason === "up-to-date" ? "no section needed a change" : (d.reason ?? "nothing written") };
       if (d.updated.length) return { text: `updated ${d.updated.length} section(s): ${d.updated.join(", ")}`, files: d.output ? [d.output] : noFiles(pg), next: "review with git diff" };
       if (d.reason === "up-to-date") return { text: "every section matches the code; nothing changed" };
@@ -684,6 +970,9 @@ function runDocTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, arg
     },
     tool,
   );
+  // files of the request that were not documented: partial, the model does them by hand
+  if (tool && v?.mode === "comments" && v.ok && v.left?.length) tool.remaining = `not documented: ${v.left.join(", ")}; do by hand`;
+  return v;
 }
 
 /** /test [--file PATH] [--test PATH] [--expect-fail] <what to test>: writes tests only, runs them (src/workflows/testgen.ts). */
@@ -703,7 +992,7 @@ function runTestTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, ar
     (t) =>
       t.ok
         ? { text: `${t.outcome === "expected-fail" ? "tests fail on current code, as expected" : "tests pass"}${t.testFile ? ` (${t.testFile})` : ""}`, files: t.files, next: "review with git diff" }
-        : { outcome: t.outcome === "possible-bug" ? "blocked" : "failed", reason: t.outcome === "possible-bug" ? "tests fail on current code: possible bug (kept for you to look at)" : t.outcome, files: t.files },
+        : { outcome: t.outcome === "possible-bug" ? "blocked" : "failed", reason: t.outcome === "possible-bug" ? "tests fail on current code: possible bug (kept)" : t.outcome, files: t.files },
     tool,
   );
 }
@@ -718,13 +1007,16 @@ function registerReview(pi: ExtensionAPI, cfg: Config): void {
   });
 }
 
-function runReviewTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, args: Parameters<typeof runReview>[0], tool?: ToolCapture) {
-  return tracked(
+async function runReviewTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, args: Parameters<typeof runReview>[0], tool?: ToolCapture) {
+  const v = await tracked(
     pi, cfg, ctx, "review", REVIEW_PHASES,
     (r) => runReview(args, { cwd: ctx.cwd, config: cfg, chat: r.chat, progress: r.pg, report: r.report }),
-    (v) => ({ text: v.hunks ? `${v.findings.length} finding(s) in ${v.hunks} hunk(s)` : "no changes to review", next: v.findings.length ? "fix them with /fix, or see findings.json" : undefined }),
+    (v) => ({ text: v.hunks ? `${v.findings.length} finding(s) in ${v.hunks} hunk(s)${v.unread ? `, ${v.unread} unread` : ""}` : "no changes to review", next: v.findings.length ? "fix them with /fix, or see findings.json" : undefined }),
     tool,
   );
+  // a hunk whose reply stayed cut was not reviewed: partial, the model reads that part of the diff itself
+  if (tool && v?.unread) tool.remaining = `${v.unread} hunk(s) unread (reply cut); read them in git diff`;
+  return v;
 }
 
 /** The research branch as a function of a question: a short cited answer; the local `find` is the branch tool of src/branch.ts. */
@@ -811,7 +1103,7 @@ function runBuildTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, l
         progress: r.pg,
         pi: handoffFor(pi, cfg, ctx, loop, r, tool),
         report: r.report,
-        confirm: confirmFor(ctx, { kind: "git-init", explicit: args.yes || (tool !== undefined && explicitlyAsked("git-init", modeState.lastPrompt)) }),
+        confirm: confirmFor(ctx, { kind: "git-init", explicit: args.yes || (tool !== undefined && explicitlyAsked("git-init", modeState.lastPrompt)), fromTool: tool !== undefined }),
       }),
     (b, pg) =>
       b.blocked !== null
@@ -842,10 +1134,17 @@ function registerTools(pi: ExtensionAPI, cfg: Config, loop: LoopControl): void {
     const missing = { fix: need("task"), edit_file: need("path") ?? need("instruction"), add: need("task"), explain: need("question"), test: need("what"), doc: need("request"), review: null, commit: null, plan: need("request"), build: null, research: need("question") }[name];
     if (missing) return { text: missing, ok: false };
     let extra = "";
+    let reason: string | undefined;
     switch (name) {
       case "fix": {
-        const r = await runFixTracked(pi, cfg, ctx, loop, { undo: false, task: str("task") }, tool);
-        if (r?.solvedBy === "none") extra = `The ladder's edits were undone; the files are as they were.${tool.handoff ? ` Continue yourself with read, edit and run_tests. ${tool.handoff.slice(tool.handoff.indexOf("A reviewer's") >= 0 ? tool.handoff.indexOf("A reviewer's") : 0, 900)}` : ""}`;
+        const r = await runFixTracked(pi, cfg, ctx, loop, { test: opt("test"), undo: false, task: str("task") }, tool);
+        if (r?.solvedBy === "none") {
+          // once: a kept tree gets its counts and failing tests (the reviewer's prose describes an earlier tree); an undone tree gets the diagnosis
+          extra = r.kept
+            ? `${r.kept} Continue by hand: read, edit, run_tests.`
+            : `Ladder edits undone; files as before.${tool.handoff ? ` Continue by hand: read, edit, run_tests. ${handoverText(tool.handoff)}` : ""}`;
+          reason = r.kept ? "no rung solved it; best tree kept" : "no rung solved it; edits undone";
+        }
         break;
       }
       case "edit_file":
@@ -861,7 +1160,7 @@ function registerTools(pi: ExtensionAPI, cfg: Config, loop: LoopControl): void {
         await runTestTracked(pi, cfg, ctx, { file: opt("file"), expectFail: false, task: str("what") }, tool);
         break;
       case "doc": {
-        const a = docArgsFromText(str("request"), readmeHeadings(ctx.cwd), findReadme(ctx.cwd));
+        const a = docArgsFromText(str("request"), readmeHeadingLevels(ctx.cwd), findReadme(ctx.cwd));
         if (a.mode === "comments") a.file = opt("file");
         await runDocTracked(pi, cfg, ctx, a, tool);
         break;
@@ -886,8 +1185,9 @@ function registerTools(pi: ExtensionAPI, cfg: Config, loop: LoopControl): void {
         break;
     }
     const detail = ANSWER_TOOLS.has(name) && tool.lines.length ? `\n${tool.lines.join("\n")}` : "";
-    return { text: forTool(`${tool.text || `${name}: no result`}${extra ? `\n${extra}` : ""}${detail}`), ok: tool.ok };
+    return { text: forTool(`${tool.text || `${name}: no result`}${extra ? `\n${extra}` : ""}${detail}`), ok: tool.ok, ...(reason && !tool.ok ? { reason } : {}), ...(tool.remaining && tool.ok ? { remaining: tool.remaining } : {}) };
   };
   loop.runTool = runner;
-  registerWorkflowTools(pi, runner);
+  // only the intercepted workflows are declared to the model (config `intercept`); slash commands run every workflow
+  registerWorkflowTools(pi, runner, cfg.intercept);
 }

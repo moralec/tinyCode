@@ -13,13 +13,23 @@ const VERBS: Record<string, RegExp> = {
   fix: /\b(fix|bug|broken|crash(es|ing)?|fails?|failing|wrong|error|doesn'?t work|isn'?t working|regression)\b/,
   edit: /\b(add|rename|move|refactor|implement|support|make|remove|delete|replace|extract|change)\b/,
   review: /\b(review|look over|check over|audit)\b/,
-  readme: /\b(readme|overview|document|documentation|docs)\b/,
+  // "document" alone is prose (exercise instructions say it); the README workflow needs README / docs / overview wording
+  readme: /\b(?:readme|overview|documentation|docs|document (?:this|the|our|my|these|those|it))\b/,
 };
 // "build/create/make a ... app/tool/script": a new thing with no matching file goes to /plan (S11).
+// A source or test file named in the message ("Edit bowling.py ...") means an existing thing to change, never a new one.
+const NAMED_FILE = /(?<![\w/.-])[\w./-]+\.(?:py|ts|tsx|js|mjs|go|rs|java|rb|c|cpp|h)\b/i;
+// "make the tests pass", "so that the tests in X pass", "fix the failing tests": run the tests, repair the code (/fix).
+// A test file name (X_test.py, test_x.py) with a pass/fail verb says the same. Outranks readme, plan and test-writing.
+const TEST_FILE = /(?<![\w/.-])[\w./-]*(?:_test\.py|(?<![\w])test_[\w-]+\.py)\b/gi;
+const PASS_VERB = /\b(pass|passes|passing|passed|fail|fails|failing|failed)\b/;
+const PASS_ASK = /\b(?:make|get|keep)\s+(?:all\s+|the\s+|these\s+|those\s+|every\s+)*(?:failing\s+|unit\s+)*tests?\s+pass\b|\btests?\b[^.?!\n]{0,80}\bpass(?:es)?\b|\bfix(?:ing)?\s+(?:all\s+|the\s+|these\s+|those\s+)*(?:failing|broken)\s+tests?\b/;
 const PLAN = /\b(build|create|make|write|develop|set up)\s+(me\s+)?(a|an|the|my|some)\b[^.?!]*\b(app|application|tool|script|cli|program|website|site|api|bot|library|service|game|project)\b/;
 // "add/write/implement a new <function|endpoint|option|...>": new code (S14), not a change to existing code.
 const NEW_THING = "functions?|methods?|endpoints?|routes?|options?|flags?|commands?|subcommands?|classes|class|helpers?|handlers?|arguments?|parameters?|decorators?";
 const ADD = new RegExp(`\\b(add|write|create|implement|introduce)\\s+(a|an|another|new)\\s+(?:[\\w-]+\\s+){0,3}(${NEW_THING})\\b`);
+// "rename X everywhere / and every caller": a change across files. /edit is one file by design -> Pi's own tools.
+const RENAME_ALL = /\brename\b[^.?!]*\b(?:everywhere|every (?:caller|call|use|usage|reference|call site)s?|all (?:callers|calls|uses|usages|references|call sites)|across (?:the )?(?:repo|codebase|project|files))\b/;
 // "what does X do / explain X / how does X work" about a named file or symbol of this repo (S15). Needs a file
 // found in the repo; a general question with no repo name stays "none" (S18's /ask).
 const EXPLAIN = /\b(explain|walk me through|what (does|is|do)\b[^?!]*\b(do|does|doing|for)\b|how (does|do|is)\b[^?!]*\b(work|works|working|implemented)\b)/;
@@ -55,10 +65,10 @@ export const SCHEMA = {
   required: ["workflow", "file", "goal", "confident"],
 };
 export const SYSTEM =
-  "You route a developer's message to a workflow. fix = repair a bug or failing behaviour; edit = change, rename or move " +
-  "existing code; add = write a new function, option, endpoint or class; review = read code and report problems; readme = write or update docs; none = a " +
-  'question, chat, or anything unclear. file = the one repository path the message is about, or "". ' +
-  "confident = false unless the message clearly asks for that workflow. Reply with JSON only.";
+  "Route a developer message to a workflow. fix = repair bug or failing behaviour; edit = change, rename, move existing code; " +
+  "add = write new function, option, endpoint, class; review = read code, report problems; readme = write or update docs; " +
+  'none = question, chat, unclear. file = the one repo path the message is about, or "". ' +
+  "confident = false unless the message clearly asks for that workflow. Reply JSON only.";
 
 const SKIP = new Set(["__pycache__", "node_modules", "venv"]);
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
@@ -174,27 +184,67 @@ export function findFile(text: string, names: Map<string, string>): string {
 export interface Route {
   workflow: Workflow;
   file: string;
+  /** a test file the message names (fix runs it); only set with a fix route */
+  test?: string;
   goal: string;
   confident: boolean;
 }
 
-export function heuristic(text: string, names: Map<string, string>): Route {
+/** The fix route for "make the tests pass" (see PASS_ASK): file = the named source file, test = the named test file. */
+function fixTests(text: string, low: string, names: Map<string, string>, files: string[]): Route | null {
+  const tests = [...text.matchAll(TEST_FILE)].map((m) => m[0]);
+  const testNamed = tests.length > 0 && PASS_VERB.test(low);
+  if (!testNamed && !PASS_ASK.test(low)) return null;
+  const resolveFile = (n: string): string => files.find((f) => f === n) ?? files.find((f) => f.slice(f.lastIndexOf("/") + 1) === n.slice(n.lastIndexOf("/") + 1)) ?? n;
+  const test = tests.length ? resolveFile(tests[0]!) : undefined;
+  const isTest = (p: string) => p === test || /(?:_test\.py|(?:^|\/)test_[^/]*\.py)$/.test(p);
+  // a file named in the text beats a repo name that merely occurs in the prose
+  let file = "";
+  for (const m of text.matchAll(new RegExp(NAMED_FILE.source, "gi"))) {
+    const f = resolveFile(m[0]);
+    if (files.includes(f) && !isTest(f)) { file = f; break; }
+  }
+  if (!file) file = findFile(low, new Map([...names].filter(([, p]) => !isTest(p))));
+  return { workflow: "fix", file, ...(test ? { test } : {}), goal: text, confident: true };
+}
+
+/** True when `file` was found only through its bare stem: no path, file name or symbol of it is in the text. */
+function stemOnly(low: string, file: string, names: Map<string, string>): boolean {
+  const base = file.slice(file.lastIndexOf("/") + 1).toLowerCase();
+  const stem = splitExt(base)[0];
+  const word = (w: string) => new RegExp(`(?<![\\w/])${esc(w)}(?![\\w])`).test(low);
+  if (low.includes(file.toLowerCase()) || low.includes(base) || !word(stem)) return false;
+  for (const [k, p] of names) if (p === file && k !== stem && k !== base && !k.includes(" ") && word(k)) return false;
+  return true;
+}
+
+export function heuristic(text: string, names: Map<string, string>, files: string[] = [...new Set(names.values())]): Route {
   const low = text.toLowerCase();
+  const ft = fixTests(text, low, names, files);
+  if (ft) return ft;
   let found = Object.keys(VERBS).filter((w) => VERBS[w]!.test(low));
   if (found.includes("readme")) found = ["readme"];
   else if (found.includes("review")) found = ["review"];
   const file = findFile(low, names);
   const question = QUESTION.test(low) && !POLITE.test(low);
   if (!question && DOC.test(low) && !found.includes("fix") && !found.includes("review") && !found.includes("readme")) return { workflow: "doc", file, goal: text, confident: true };
+  const addOnly = !found.length || (found.length === 1 && found[0] === "edit");
+  // "add a new function ... and tests for it": /add writes code plus a test; tests-only wins when it is asked first
+  const addAt = ADD.exec(low)?.index ?? -1;
+  const testsAt = TESTS.exec(low)?.index ?? -1;
+  if (!question && addOnly && addAt >= 0 && (testsAt < 0 || addAt < testsAt)) return { workflow: "add", file, goal: text, confident: true };
   if (!question && TESTS.test(low) && !found.includes("fix") && !found.includes("review") && !found.includes("readme")) return { workflow: "test", file, goal: text, confident: true };
   if (!file && RESEARCH.test(low) && !found.includes("fix") && !found.includes("review") && !found.includes("readme") && !DOC_README.test(low)) return { workflow: "research", file: "", goal: text, confident: true };
-  if (!file && !question && PLAN.test(low)) return { workflow: "plan", file: "", goal: text, confident: true };
+  if (!file && !question && PLAN.test(low) && !NAMED_FILE.test(text)) return { workflow: "plan", file: "", goal: text, confident: true };
   if (file && EXPLAIN.test(low) && !found.includes("review") && !found.includes("readme")) return { workflow: "explain", file, goal: text, confident: true };
   if (!file && question && GENERAL.test(low) && !REPO_REF.test(low)) return { workflow: "ask", file: "", goal: text, confident: true };
-  const addOnly = !found.length || (found.length === 1 && found[0] === "edit");
-  if (!question && addOnly && ADD.test(low)) return { workflow: "add", file, goal: text, confident: true };
+  // file "" on purpose: no one file to /edit, so the hint sends the model to its own tools (tools.ts hintFor)
+  if (!question && RENAME_ALL.test(low)) return { workflow: "edit", file: "", goal: text, confident: true };
   if (question || !found.length) return { workflow: "none", file, goal: text, confident: question };
-  return { workflow: found[0] as Workflow, file, goal: text, confident: found.length === 1 };
+  // an edit whose file is only a bare stem in the prose ("its own extension in settings") is a guess, not the one
+  // file to change: no file, so no one-file /edit run (the hint sends the model to its own tools)
+  const editFile = found[0] === "edit" && file && stemOnly(low, file, names) ? "" : file;
+  return { workflow: found[0] as Workflow, file: editFile, goal: text, confident: found.length === 1 };
 }
 
 export interface Routed extends Route {
@@ -206,11 +256,12 @@ export interface Routed extends Route {
   error?: string;
 }
 
-export async function route(text: string, idx: RepoIndex, chat: ChatFn): Promise<Routed> {
+export async function route(text: string, idx: RepoIndex, chat: ChatFn, useModel = true): Promise<Routed> {
   const t0 = Date.now();
-  const h = heuristic(text, idx.names);
+  const h = heuristic(text, idx.names, idx.files);
   let r: Routed = { ...h, source: "code", prompt_tokens: 0, completion_tokens: 0, ms: 0 };
-  if (!h.confident) {
+  if (!h.confident && !useModel) r = { ...r, workflow: "none" };
+  else if (!h.confident) {
     try {
       const res = await chat(
         "route",

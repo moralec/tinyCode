@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig } from "../../src/config.ts";
 import { actionable, heuristic } from "../../src/router.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
@@ -11,7 +11,7 @@ import { gatherContext, isRelativePath, parsePlan, planMarkdown, runPlan, valida
 const task = (id: number, over: Record<string, unknown> = {}) => ({ id, title: `task ${id}`, files: [`src/m${id}.py`], test: `tests/test_m${id}.py checks m${id}`, ...over });
 const good = (n = 4) => ({ spec: "A habit tracker.", stack: "Python, pytest", tasks: Array.from({ length: n }, (_, i) => task(i + 1)) });
 const reply = (o: unknown): ChatResult => ({ text: typeof o === "string" ? o : JSON.stringify(o), usage: { prompt_tokens: 300, cached_tokens: 0, completion_tokens: 200 }, ms: 1, lane: "trunk", model: "m", fellBack: false });
-const tmp = () => mkdtempSync(join(tmpdir(), "tc-plan-"));
+const tmp = () => tmpDir("tc-plan-");
 
 test("validatePlan: a good plan passes and every task gets done:false", () => {
   const r = validatePlan(good(5));

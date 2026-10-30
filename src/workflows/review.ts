@@ -43,13 +43,12 @@ export const HUNK_SCHEMA = {
   required: ["findings"],
 };
 
-export const REVIEW_RUBRIC = `You review one hunk of a code change for real defects.
-Each line of the hunk starts with its line number in the new file (removed lines have none), then ' ', '+' or '-'.
-Report only defects the change introduces or leaves in the shown code: wrong results, wrong format strings or
-constants, off-by-one, inverted conditions, unhandled errors, resource leaks, broken callers of changed behaviour.
-Do not report style, naming, missing tests or missing comments. Use the docstrings and names as the intended behaviour.
-Reply with JSON: {"findings":[{"line":<new-file line number>,"severity":"high|medium|low","issue":"<one sentence>","fix":"<one sentence>"}]}
-At most 3 findings. If the hunk has no defect, reply {"findings":[]}.`;
+export const REVIEW_RUBRIC = `Review one hunk of a code change for real defects.
+Each hunk line starts with its new-file line number (removed lines: none), then ' ', '+' or '-'.
+Report only defects the change introduces or leaves in the shown code: wrong results, wrong format strings or constants, off-by-one, inverted conditions, unhandled errors, resource leaks, broken callers of changed behaviour.
+No style, naming, missing tests or comments. Docstrings and names = intended behaviour.
+Reply JSON: {"findings":[{"line":<new-file line number>,"severity":"high|medium|low","issue":"<one sentence>","fix":"<one sentence>"}]}
+Max 3 findings. No defect: {"findings":[]}.`;
 
 export interface Finding {
   file: string;
@@ -121,18 +120,25 @@ export function fileLine(file: string, text: string | null): string {
 
 const SEV = new Set(["high", "medium", "low"]);
 
+type RawFinding = { line: number; severity: Severity; issue: string; fix: string };
+
 /** Parse one hunk reply into raw findings; tolerant of fences. Returns [] when it is not the expected JSON. */
-export function parseFindings(text: string): { line: number; severity: Severity; issue: string; fix: string }[] {
+export function parseFindings(text: string): RawFinding[] {
+  return readFindings(text) ?? [];
+}
+
+/** Like parseFindings, but null when the reply is not the expected JSON (cut at the output limit, prose): unread, not "no findings". */
+export function readFindings(text: string): RawFinding[] | null {
   const m = text.match(/\{[\s\S]*\}/);
-  if (!m) return [];
+  if (!m) return null;
   let j: unknown;
   try {
     j = JSON.parse(m[0]);
   } catch {
-    return [];
+    return null;
   }
   const arr = (j as { findings?: unknown }).findings;
-  if (!Array.isArray(arr)) return [];
+  if (!Array.isArray(arr)) return null;
   const out = [];
   for (const f of arr) {
     const x = f as Record<string, unknown>;
@@ -184,7 +190,12 @@ export interface ReviewResult {
   lines: string[];
   /** where findings.json was written, or null when nothing was reviewed */
   file: string | null;
+  /** hunks whose reply stayed cut or unreadable after the one retry: not reviewed */
+  unread: number;
 }
+
+/** The retry after a cut or non-JSON hunk reply (review-1-money r3: cut at 250 tokens, both planted bugs in the cut part). */
+export const CUT_RETRY = "Last reply cut. JSON only, max 1 finding, short sentences.";
 
 export async function runReview(args: ReviewArgs, deps: ReviewDeps): Promise<ReviewResult> {
   const lines: string[] = [];
@@ -199,7 +210,7 @@ export async function runReview(args: ReviewArgs, deps: ReviewDeps): Promise<Rev
   const skipped = sel.skippedLock + sel.skippedCap;
   if (!sel.hunks.length) {
     say("/review: no changes to review");
-    return { findings: [], calls: 0, hunks: 0, skipped, lines, file: null };
+    return { findings: [], calls: 0, hunks: 0, skipped, lines, file: null, unread: 0 };
   }
   const read =
     deps.readFile ??
@@ -213,6 +224,7 @@ export async function runReview(args: ReviewArgs, deps: ReviewDeps): Promise<Rev
   const per: { hunk: Hunk; raw: ReturnType<typeof parseFindings> }[] = [];
   const replyLog = join(dirname(logPath(deps.env ?? process.env)), "review-replies.jsonl");
   let calls = 0;
+  let unread = 0;
   for (const [k, h] of sel.hunks.entries()) {
     pg.step("review hunks", k + 1, sel.hunks.length);
     const messages: Message[] = [
@@ -222,28 +234,45 @@ export async function runReview(args: ReviewArgs, deps: ReviewDeps): Promise<Rev
         content: `File: ${fileLine(h.file, read(h.file))}\nHunk ${h.header}\n${numberedHunk(h)}\n\nReview this hunk.`,
       },
     ];
-    calls++;
-    const r = await deps.chat("hunk", messages, { workflow: "review", config: deps.config, env: deps.env, schema: HUNK_SCHEMA, schemaName: "hunk_findings" });
-    try {
-      mkdirSync(dirname(replyLog), { recursive: true });
-      appendFileSync(replyLog, JSON.stringify({ ts: new Date().toISOString(), file: h.file, header: h.header, model: r.model, prompt_tokens: r.usage.prompt_tokens, reply: r.text }) + "\n");
-    } catch {
-      // the reply log must not break a review
+    const log = (r: { model: string; usage: { prompt_tokens: number }; text: string; finish?: string }) => {
+      try {
+        mkdirSync(dirname(replyLog), { recursive: true });
+        appendFileSync(replyLog, JSON.stringify({ ts: new Date().toISOString(), file: h.file, header: h.header, model: r.model, prompt_tokens: r.usage.prompt_tokens, finish: r.finish, reply: r.text }) + "\n");
+      } catch {
+        // the reply log must not break a review
+      }
+    };
+    const ask = async (msgs: Message[]) => {
+      calls++;
+      const r = await deps.chat("hunk", msgs, { workflow: "review", config: deps.config, env: deps.env, schema: HUNK_SCHEMA, schemaName: "hunk_findings" });
+      log(r);
+      return r;
+    };
+    // a cut or non-JSON reply is not "no findings": one retry asking for less, then the hunk is reported unread
+    let r = await ask(messages);
+    let raw = r.finish === "length" ? null : readFindings(r.text);
+    if (raw === null) {
+      r = await ask([messages[0]!, { role: "user", content: `${messages[1]!.content}\n${CUT_RETRY}` }]);
+      raw = r.finish === "length" ? null : readFindings(r.text);
     }
-    per.push({ hunk: h, raw: parseFindings(r.text) });
+    if (raw === null) {
+      unread++;
+      say(`${h.file} ${h.header}: reply cut, hunk not reviewed`);
+    }
+    per.push({ hunk: h, raw: raw ?? [] });
   }
   pg.step("merge");
   const findings = mergeFindings(per);
   const file = join(dirname(logPath(deps.env ?? process.env)), "findings.json");
   try {
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, JSON.stringify({ hunks: sel.hunks.length, skipped, findings }, null, 2) + "\n");
+    writeFileSync(file, JSON.stringify({ hunks: sel.hunks.length, skipped, unread, findings }, null, 2) + "\n");
   } catch {
     // printing still works
   }
   for (const f of findings) say(`${f.file}:${f.line} ${f.severity} ${f.issue}${f.fix ? ` (fix: ${f.fix})` : ""}`);
-  if (!findings.length) say("no findings");
+  if (!findings.length) say(unread ? "no findings in the hunks read" : "no findings");
   if (skipped) say(`skipped ${skipped} hunk${skipped === 1 ? "" : "s"} (${sel.skippedLock} lockfile, ${sel.skippedCap} over the ${MAX_HUNKS}-hunk cap)`);
   say(`reviewed ${sel.hunks.length} hunks in ${calls} calls`);
-  return { findings, calls, hunks: sel.hunks.length, skipped, lines, file };
+  return { findings, calls, hunks: sel.hunks.length, skipped, lines, file, unread };
 }

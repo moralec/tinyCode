@@ -1,7 +1,7 @@
 {
   "name": "tinycode",
-  "version": "0.1.0",
-  "description": "A Pi extension for coding with small local models: workflows that spend as few tokens as possible on every call",
+  "version": "1.0.0",
+  "description": "A Pi extension that keeps the context small, so local models finish coding tasks in a 16k window where plain Pi runs out of room",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

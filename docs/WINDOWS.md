@@ -2,7 +2,7 @@
 
 tinyCode is an extension for [Pi](https://pi.dev) (a terminal coding agent) that makes small local models useful:
 `/fix` walks a ladder (one cheap edit call, a short review, then Pi's own loop), `/edit` changes one file, `/review`
-reads a diff hunk by hunk. Windows support is **untested so far** (v0.1 preview). Please report what breaks, including things that look like your own mistake.
+reads a diff hunk by hunk. Windows support is **untested so far** (v1.0 preview). Please report what breaks, including things that look like your own mistake.
 
 ## What you need
 

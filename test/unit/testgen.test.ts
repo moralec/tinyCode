@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig, type Config } from "../../src/config.ts";
 import type { ExecFn } from "../../src/lint.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
@@ -27,7 +27,7 @@ const block = (path: string, search: string, replace: string) => `${path}\n<<<<<
 
 const CALC = "def add(a, b):\n    return a + b\n\n\ndef clamp(x, lo, hi):\n    return max(lo, min(x, hi))\n\n\ndef half(x):\n    return x // 3\n";
 function mk(files: Record<string, string>) {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-testgen-"));
+  const d = tmpDir("tinycode-testgen-");
   for (const [f, t] of Object.entries(files)) {
     mkdirSync(join(d, f, ".."), { recursive: true });
     writeFileSync(join(d, f), t);

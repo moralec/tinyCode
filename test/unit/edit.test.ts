@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { copyFileSync, cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig, type Config } from "../../src/config.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
 import { run, scptRoutine } from "../../src/routines/index.ts";
@@ -25,7 +25,7 @@ function scripted(replies: string[]) {
 }
 
 function slugRepo() {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-edit-"));
+  const d = tmpDir("tinycode-edit-");
   const cwd = join(d, "repo");
   cpSync(join(ROOT, "test/fixtures/task-repos/t03-slugify"), cwd, { recursive: true, filter: (s) => !s.includes("__pycache__") });
   return cwd;
@@ -133,7 +133,7 @@ test("py edit with a test: the configured test decides the check", async () => {
 });
 
 test("/edit x.scpt returns the routine's why when it is unavailable", { skip: mac ? "needs a machine without the AppleScript tools" : false }, async () => {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-edit-"));
+  const d = tmpDir("tinycode-edit-");
   const out: string[] = [];
   const { chat } = scripted([]);
   const r = await runEdit({ path: "x.scpt", instruction: "change the greeting" }, { cwd: d, config: cfg(), chat, report: (l) => out.push(l) });
@@ -144,7 +144,7 @@ test("/edit x.scpt returns the routine's why when it is unavailable", { skip: ma
 });
 
 test("scpt edit on macOS: scripted edit shows after osadecompile; a bad edit leaves the original intact", { skip: mac ? false : "skipped: needs macOS" }, async () => {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-edit-"));
+  const d = tmpDir("tinycode-edit-");
   copyFileSync(join(ROOT, "test/fixtures/scpt/hello.applescript"), join(d, "hello.applescript"));
   assert.equal((await run("osacompile", ["-o", join(d, "hello.scpt"), join(d, "hello.applescript")])).code, 0);
   const f = join(d, "hello.scpt");

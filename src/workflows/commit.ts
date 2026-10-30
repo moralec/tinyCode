@@ -17,14 +17,14 @@ export const SUBJECT_MAX = 72;
 export const DIFF_CHARS = 12000;
 export const TYPES = ["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"] as const;
 
-export const COMMIT_RULES = `You write a git commit message for the staged change shown below.
-Format (Conventional Commits):
+export const COMMIT_RULES = `Write a git commit message for the staged change below.
+Conventional Commits:
 <type>(<optional scope>): <subject>
 
 <body>
-type is one of: ${TYPES.join(", ")}. The subject is imperative, lower case after the colon, no trailing period, at most ${SUBJECT_MAX} characters in all.
-Then one blank line, then a body of one to five short lines saying what changed and why, wrapped near 72 characters.
-Describe only what the diff shows. Reply with the message only: no code fences, no quotes, no commentary.`;
+type: ${TYPES.join(", ")}. Subject imperative, lower case after colon, no trailing period, max ${SUBJECT_MAX} chars in all.
+Blank line, then body of 1-5 short lines: what changed and why, wrapped near 72 chars.
+Only what the diff shows. Reply message only: no code fences, quotes, commentary.`;
 
 export interface CommitArgs {
   yes: boolean;
@@ -210,7 +210,7 @@ export async function runCommit(args: CommitArgs, deps: CommitDeps): Promise<Com
   let check = validateMessage(reply);
   if (!check.ok) {
     say(`message refused (${check.reason}); retrying once`);
-    msgs.push({ role: "assistant", content: reply }, { role: "user", content: `That message was refused: ${check.reason}. Reply with the corrected message only.` });
+    msgs.push({ role: "assistant", content: reply }, { role: "user", content: `Message refused: ${check.reason}. Corrected message only.` });
     reply = await call();
     check = validateMessage(reply);
   }

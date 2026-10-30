@@ -18,11 +18,14 @@ export const CONTEXT_CHARS = 16000; // ~4k tokens
 export const MAX_WORDS = 200;
 const BODY_LINES = 80;
 const FILE_LINES = 120;
+// callee bodies, not signatures: the helpers hold the facts (rounding, remainder, format) a signature cannot show
+// (explain-3-share on 3a0462b: "def split_evenly(cents, parts)" alone, rounding then invented)
+const CALLEE_BODIES = 4;
+const CALLEE_BUDGET = 40;
+const CALLEE_LINES = 15;
 
-export const EXPLAIN_RULES = `You explain code in a repository to a developer. Answer only from the code shown below.
-Reply in at most ${MAX_WORDS} words, plain sentences, no headings. Cite the code for every claim as path:line
-(for example orders/dates.py:12), using the line numbers shown. Cite only lines you were shown. If the shown code
-does not answer the question, say so in one sentence. Do not suggest changes.`;
+export const EXPLAIN_RULES = `Explain code in a repo. Answer only from the code shown below.
+Max ${MAX_WORDS} words, plain sentences, no headings. Cite every claim as path:line (example orders/dates.py:12), using the shown line numbers. Cite only shown lines. Code does not answer: say so in one sentence. No change suggestions.`;
 
 export interface ExplainArgs {
   file?: string;
@@ -196,25 +199,47 @@ export function gather(cwd: string, target: Target, question: string, cap = CONT
     if (imps.length) add("Imports:", imps.join("\n"));
   }
   if (callers.length) add(target.symbol ? "Callers (other mentions):" : "Files that import it:", callers.join("\n"));
-  // callees: where each called name is defined in the repo (path:line: signature)
+  // callees: where each called name is defined in the repo; in call order, then what those bodies call or pass on
+  // (one level down: by_month -> group_by, month_key), up to CALLEE_BODIES with their body (numbered, at most
+  // CALLEE_LINES each, CALLEE_BUDGET in all), the rest as path:line: signature. Defs already shown are skipped.
+  const shownTo = target.symbol && target.line ? 0 : Math.min(lines.length, FILE_LINES);
+  const bodies: string[] = [];
   const defs: string[] = [];
+  let bodyLines = 0;
   if (calleeNames.length) {
-    const want = calleeNames.slice(0, 12);
-    outer: for (const f of files) {
-      if (!/\.(py|js|ts|mjs|cjs|jsx|tsx)$/.test(f)) continue;
-      const ls = f === target.file ? lines : readLines(cwd, f);
-      if (!ls) continue;
-      for (const name of want) {
-        const re = DEF(name);
-        const i = ls.findIndex((l) => re.test(l));
-        if (i >= 0 && !(f === target.file && target.line === i + 1)) {
-          defs.push(`${f}:${i + 1}: ${ls[i]!.trim().slice(0, 140)}`);
-          if (defs.length >= 8) break outer;
-        }
+    const cache = new Map<string, string[] | null>([[target.file, lines]]);
+    const linesOf = (f: string) => {
+      if (!cache.has(f)) cache.set(f, readLines(cwd, f));
+      return cache.get(f)!;
+    };
+    const code = files.filter((f) => /\.(py|js|ts|mjs|cjs|jsx|tsx)$/.test(f));
+    const queue = calleeNames.slice(0, 12).map((name) => ({ name, top: true }));
+    const seen = new Set([...calleeNames, target.symbol ?? ""]);
+    for (let q = 0; q < queue.length && q < 16 && defs.length + bodies.length < 8; q++) {
+      const { name, top } = queue[q]!;
+      const re = DEF(name);
+      for (const f of code) {
+        const ls = linesOf(f);
+        const i = ls ? ls.findIndex((l) => re.test(l)) : -1;
+        if (!ls || i < 0 || (f === target.file && (target.line === i + 1 || i + 1 <= shownTo))) continue;
+        const end = bodyEnd(ls, i + 1);
+        const to = Math.min(end, i + CALLEE_LINES);
+        if (bodies.length < CALLEE_BODIES && bodyLines + to - i <= CALLEE_BUDGET) {
+          bodies.push(`${f} lines ${i + 1}-${to}:\n${numbered(ls, i + 1, to)}${to < end ? "\n..." : ""}`);
+          bodyLines += to - i;
+          if (top)
+            for (const m of ls.slice(i + 1, to).join("\n").matchAll(/\b([A-Za-z_][A-Za-z0-9_]{2,})\b/g))
+              if (!seen.has(m[1]!) && !NOT_CALLS.has(m[1]!)) {
+                seen.add(m[1]!);
+                queue.push({ name: m[1]!, top: false });
+              }
+        } else if (top) defs.push(`${f}:${i + 1}: ${ls[i]!.trim().slice(0, 140)}`);
+        break;
       }
     }
   }
-  if (defs.length) add("Callees defined in this repo:", defs.join("\n"));
+  if (bodies.length) add("Callees (numbered):", bodies.join("\n"));
+  if (defs.length) add("More callees:", defs.join("\n"));
   if (used < cap / 2) {
     // thin context: scored hits for the question's keywords, and the repo outline as a last resort
     const ev = evidence(cwd, question, { hitsCap: Math.max(0, Math.min(2500, cap - used)), outlineCap: 0 });
@@ -307,7 +332,10 @@ export async function runExplain(args: ExplainArgs, deps: ExplainDeps): Promise<
   const pg = deps.progress ?? NOOP_PROGRESS;
   pg.step("find target");
   const question = args.question || `What does ${args.file} do?`;
-  const target = findTarget(cwd, { ...args, question });
+  const found = findTarget(cwd, { ...args, question });
+  // with --file (the direct run passes the router's file) a symbol the question names in it is still the target;
+  // only here: /doc and /test take --file as the whole file
+  const target = found && args.file && !found.symbol ? inFile(cwd, found.file, question) : found;
   if (!target) {
     say(`/explain: no file or symbol found for ${JSON.stringify(question.slice(0, 60))}; name a file or a function (or use --file PATH)`);
     return none();

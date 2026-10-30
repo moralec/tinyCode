@@ -84,13 +84,15 @@ export interface ReadmeArgs {
 export function parseReadmeArgs(raw: string): ReadmeArgs {
   const out: ReadmeArgs = { maxFiles: MAX_FILES_DEFAULT, related: [], update: null };
   let r = raw.trim();
-  const val = /^(?:=|\s+)(?:"([^"]*)"|'([^']*)'|(\S+))\s*/;
+  // a value: one word, one quoted string, or a comma list of quoted strings (`--update "Usage","Install"`: every one kept)
+  const val = /^(?:=|\s+)((?:"[^"]*"|'[^']*')(?:\s*,\s*(?:"[^"]*"|'[^']*'))*|\S+)\s*/;
   for (;;) {
     const m = r.match(/^--(out|max-files|related|update|name)/);
     if (!m) break;
     const v = r.slice(m[0].length).match(val);
     if (!v) break;
-    const value = (v[1] ?? v[2] ?? v[3]) as string;
+    const quoted = [...v[1]!.matchAll(/"([^"]*)"|'([^']*)'/g)].map((q) => (q[1] ?? q[2]) as string);
+    const value = /^["']/.test(v[1]!) ? quoted.join(",") : v[1]!;
     r = r.slice(m[0].length + v[0].length);
     if (m[1] === "out") out.out = value;
     else if (m[1] === "max-files") out.maxFiles = Math.max(1, Math.min(200, Number.parseInt(value, 10) || MAX_FILES_DEFAULT));
@@ -1309,6 +1311,95 @@ export function sectionShrink(before: string, after: string): number {
   return b ? Math.max(0, (b - after.trim().length) / b) : 0;
 }
 
+const CLAIM_SYSTEM =
+  "A README sentence is about to be changed. You see the old sentence, the new sentence and numbered lines from the project's source (path:line: text). " +
+  "Decide which one the source supports. Reply with JSON {\"verdict\": \"old_correct\" | \"new_correct\" | \"unclear\", \"evidence\": \"path:line\"} where evidence is ONE of the numbered lines shown that supports your verdict. " +
+  "Answer new_correct only when a shown line proves the new sentence (or proves the old one false); a claim the shown lines do not cover is unclear; if the old sentence is still true, old_correct.";
+const claimSchema = { type: "object", required: ["verdict", "evidence"], properties: { verdict: { type: "string", enum: ["old_correct", "new_correct", "unclear"] }, evidence: S } };
+export const CLAIM_LINE_CAP = 60;
+
+/** True when the edit changes or removes text: not a pure addition (the old text is still all there inside the new). */
+export function changesClaim(search: string, replace: string): boolean {
+  const a = norm(search);
+  const b = norm(replace);
+  return a !== b && !b.includes(a);
+}
+
+/** Identifier-like words of a sentence: `backticked`, snake_case, camelCase, file names with an extension. */
+export function claimIdentifiers(...texts: string[]): string[] {
+  const out = new Set<string>();
+  for (const t of texts) {
+    for (const m of t.matchAll(/`([^`\n]{2,60})`/g)) out.add(m[1]!.trim());
+    for (const m of t.matchAll(/[A-Za-z_][\w-]*(?:[./][\w-]+)*\.[A-Za-z]{1,5}\b/g)) out.add(m[0]);
+    for (const m of t.matchAll(/\b[A-Za-z][a-z0-9]*(?:_[A-Za-z0-9]+)+\b|\b[a-z]+[A-Z][A-Za-z0-9]*\b/g)) out.add(m[0]);
+  }
+  return [...out].filter((x) => x.length >= 3);
+}
+
+/**
+ * The source lines a claim's check call sees: the files its sentences name (file names), the places where their code
+ * identifiers are defined or used, and the files mapped to the section (`mapped`: by the file notes). Numbered `path:line: text`.
+ * `shown` is what the verdict's evidence may cite.
+ */
+export function claimSources(map: ProjectMap, oldText: string, newText: string, mapped: string[], cap = CLAIM_LINE_CAP): { text: string; shown: Map<string, Set<number>> } {
+  const shown = new Map<string, Set<number>>();
+  const rows: string[] = [];
+  const add = (path: string, i: number, line: string): boolean => {
+    if (rows.length >= cap) return false;
+    const set = shown.get(path) ?? shown.set(path, new Set()).get(path)!;
+    if (set.has(i + 1)) return true;
+    set.add(i + 1);
+    rows.push(`${path}:${i + 1}: ${line.trim().slice(0, 160)}`);
+    return true;
+  };
+  /** the first lines of a definition's body (indented lines right after it) */
+  const body = (path: string, i: number): void => {
+    const ls = (map.texts.get(path) ?? "").split("\n");
+    const ind = (x: string) => x.length - x.trimStart().length;
+    for (let k = i + 1; k < ls.length && k <= i + 8; k++) {
+      if (!ls[k]!.trim()) continue;
+      if (ind(ls[k]!) <= ind(ls[i]!)) break;
+      add(path, k, ls[k]!);
+    }
+  };
+  const ids = claimIdentifiers(oldText, newText);
+  const named = map.tracked.filter((p) => ids.some((id) => p === id || p.endsWith("/" + id) || basename(p) === basename(id)));
+  const def = /^\s*(?:export\s+)?(?:async\s+)?(?:def|class|function|const|let|var|fn|func)\b/;
+  for (const id of ids) {
+    if (/\.\w{1,5}$/.test(id) && named.some((p) => p === id || p.endsWith("/" + id) || basename(p) === basename(id))) continue; // a file name: its head is shown below
+    const re = new RegExp(`(?<![\\w])${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w])`);
+    const found: [string, number, string][] = [];
+    for (const defsOnly of [true, false]) {
+      for (const [path, text] of map.texts) {
+        const ls = text.split("\n");
+        for (let i = 0; i < ls.length && found.length < 3; i++) if (re.test(ls[i]!) && (!defsOnly || def.test(ls[i]!))) found.push([path, i, ls[i]!]);
+        if (found.length >= 3) break;
+      }
+      if (found.length) break;
+    }
+    for (const [path, i, l] of found) {
+      add(path, i, l);
+      if (def.test(l)) body(path, i);
+    }
+  }
+  for (const p of [...named, ...mapped.filter((m) => !named.includes(m))]) {
+    const ls = (map.texts.get(p) ?? "").split("\n");
+    const defs = ls.map((l, i) => [l, i] as const).filter(([l]) => def.test(l));
+    const head = ls.map((l, i) => [l, i] as const).filter(([l]) => l.trim());
+    for (const [l, i] of (defs.length >= 3 ? defs : head).slice(0, named.includes(p) ? 25 : 8)) {
+      add(p, i, l);
+      if (def.test(l)) body(p, i);
+    }
+  }
+  return { text: rows.join("\n"), shown };
+}
+
+/** The evidence line of a verdict ("path:line" or "path:a-b"), when it is one of the lines the call was shown. */
+export function validEvidence(evidence: unknown, shown: Map<string, Set<number>>): string | null {
+  const m = norm(evidence).replace(/`/g, "").match(/^(.+?):(\d+)(?:\s*-\s*\d+)?$/);
+  return m && shown.get(m[1]!)?.has(Number(m[2])) ? `${m[1]}:${m[2]}` : null;
+}
+
 export const MAX_ALL_SECTIONS = 20;
 
 /**
@@ -1451,9 +1542,39 @@ export async function runReadmeUpdate(args: ReadmeArgs, deps: ReadmeDeps): Promi
       if (bad.length) drops.push(`update ${sec.title}: dropped an edit naming ${bad.join(", ")}`);
       else usable.push(e);
     }
-    const res = applySectionEdits(source, usable);
+    // an edit that changes or removes a claim is applied only when the code backs the new text (one small check call)
+    const verified: SectionEdit[] = [];
+    const rejected: string[] = [];
+    const mapped = [...relevantLines(`${sec.title} ${sec.text}`, notes, 4).keys()];
+    for (const e of usable) {
+      if (!changesClaim(visible(e.search), visible(e.replace))) {
+        verified.push(e);
+        continue;
+      }
+      const src2 = claimSources(map, visible(e.search), visible(e.replace), mapped);
+      const v = await eng.ask(
+        "claim",
+        CLAIM_SYSTEM,
+        `Old sentence: ${norm(visible(e.search))}\nNew sentence: ${norm(visible(e.replace))}\n\nSource lines:\n${src2.text || "(none found)"}`,
+        claimSchema,
+        120,
+      );
+      const ev = v ? validEvidence(v.evidence, src2.shown) : null;
+      if (v && norm(v.verdict) === "new_correct" && ev) verified.push(e);
+      else {
+        const why = !v ? "no usable answer" : norm(v.verdict) !== "new_correct" ? norm(v.verdict) || "no verdict" : "no valid evidence line";
+        rejected.push(`kept: the code supports the original (${sec.title}: "${norm(visible(e.search)).slice(0, 50)}"; check said ${why}${v && norm(v.evidence) ? ` at ${norm(v.evidence)}` : ""})`);
+      }
+    }
+    flagged.push(...rejected);
+    const res = applySectionEdits(source, verified);
     for (const m of res.missed) drops.push(`update ${sec.title}: dropped an edit whose search text is not in the section ("${norm(m.search).slice(0, 40)}")`);
     dropped.push(...drops);
+    if (!res.applied.length && rejected.length) {
+      kept.push(sec.title);
+      summary.push(`  = kept: ${sec.title} (kept: the code supports the original)`);
+      continue;
+    }
     if (!res.applied.length || norm(res.text) === norm(source)) {
       kept.push(sec.title);
       if (!res.applied.length) flagged.push(`${sec.title}: no usable edit came back, left as it was`);

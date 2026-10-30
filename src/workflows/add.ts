@@ -11,18 +11,18 @@ import type { Config } from "../config.ts";
 import { outline, repoFiles } from "../context/outline.ts";
 import { lintPass, type LintOptions } from "../lint.ts";
 import type { Message } from "../llm.ts";
-import { applyReply } from "../protocol/apply.ts";
+import { applyReply, type ApplyResult } from "../protocol/apply.ts";
 import { EDIT_RULES } from "../protocol/prompts.ts";
 import { runTests as realRunTests } from "../testrun.ts";
 import { viewText } from "./edit.ts";
-import { PICK_SCHEMA, changedSinceSnapshot, runFix, takeSnapshot, type ChatFn, type FixResult, type PiHandoff } from "./fix.ts";
+import { PICK_SCHEMA, changedSinceSnapshot, restoreSnapshot, runFix, takeSnapshot, type ChatFn, type FixResult, type PiHandoff } from "./fix.ts";
 
 export const ADD_RULES =
   EDIT_RULES +
-  "\n\nYou are adding new code. To insert, put a few existing lines where the code belongs in SEARCH and repeat " +
-  "them in REPLACE with the new code added next to them (never an empty SEARCH for a file that exists). Also add a " +
-  "test for the new code, in the test file named in the task (an existing test file: add after existing tests with " +
-  "an anchor; a new file: empty SEARCH). Match the style of the surrounding code.";
+  "\n\nAdding new code. Insert: put a few existing lines where the code belongs in SEARCH, repeat them in REPLACE with " +
+  "the new code next to them (never an empty SEARCH for an existing file). Also add a test for the new code in the test " +
+  "file named in the task (existing test file: add after existing tests with an anchor; new file: empty SEARCH). Match " +
+  "surrounding style.";
 
 export interface AddArgs {
   test?: string;
@@ -72,6 +72,8 @@ export interface AddResult {
   files: string[];
   /** set when the ladder took over */
   fix?: FixResult;
+  /** set when /add failed and put every file back as it found it: why it failed, and what was restored or removed */
+  undone?: { why: string; restored: string[]; removed: string[] };
   lines: string[];
 }
 
@@ -87,6 +89,21 @@ function insideFile(cwd: string, p: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The test run failed before running a single test: an import or syntax error in a test file (pytest's collection
+ * phase). With /add that is its own failure: the new test is broken, not the code under test.
+ */
+export function isCollectionError(text: string): boolean {
+  return /^ERROR \S+\.\w+( |$)/m.test(text) || /during collection|ERROR collecting/.test(text) || /^E\s+(SyntaxError|IndentationError)\b/m.test(text);
+}
+
+/** Why a block on `path` did not apply (first failure for that path), or that the reply held none. */
+function whyNotApplied(res: ApplyResult, path: string): string {
+  const f = res.results.find((r) => !r.ok && r.path === path);
+  if (f) return f.reason === "not found" ? "the SEARCH text was not found in the file" : f.reason ?? "refused";
+  return res.results.length ? "the reply held no edit for it" : "the reply held no edit blocks";
 }
 
 const fence = (name: string, text: string) => `${name}\n\`\`\`\n${text}\`\`\``;
@@ -167,8 +184,8 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
         {
           role: "user",
           content:
-            `${head}\n\nTask:\n${args.task}\n\nStep 1: reply with JSON {"files": [the one existing file where the new code belongs first, ` +
-            `then up to 4 files it uses or that use that area], "reason": "..."}.`,
+            `${head}\n\nTask:\n${args.task}\n\nStep 1: JSON {"files": [existing file where the new code belongs first, ` +
+            `then max 4 files it uses or that use that area], "reason": "..."}.`,
         },
       ],
       { schema: PICK_SCHEMA, schemaName: "pick" },
@@ -209,7 +226,7 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
   pg.step("write");
   const reply = await call("edit", [
     { role: "system", content: ADD_RULES },
-    { role: "user", content: `${parts.join("\n\n")}\n\nTask:\n${args.task}\n${testLine}\n\nReply with edit blocks only.` },
+    { role: "user", content: `${parts.join("\n\n")}\n\nTask:\n${args.task}\n${testLine}\n\nEdit blocks only.` },
   ]);
   const applied = await applyReply(reply, { cwd, protected: [], maxWholeFileLines: 400 });
   for (const f of applied.applied) pg.touch(f);
@@ -220,6 +237,14 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
   const testToRun = wroteTest ?? (testPath && insideFile(cwd, testPath) ? testPath : undefined);
   if (wroteTarget && !wroteTest) say("note: the reply held no test for the new code");
 
+  const undo = (why: string): AddResult => {
+    const back = restoreSnapshot(cwd, env);
+    const restored = back?.restored ?? [];
+    const removed = back?.removed ?? [];
+    say(`${why}; undone: restored ${JSON.stringify(restored)}, removed ${JSON.stringify(removed)} (nothing of /add is left in the tree)`);
+    return { ...res(false, target, testToRun ?? null, [], undefined), undone: { why, restored, removed } };
+  };
+
   const handOver = async (why: string): Promise<AddResult> => {
     say(`${why}: handing over to /fix's ladder${testToRun ? ` on ${testToRun}` : ""}`);
     const fp = pg.nest("fix");
@@ -227,19 +252,47 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
       {
         test: testToRun,
         undo: false,
+        reproduce: false,
         task: `${args.task}\n\n(/add put new code in ${target}${testToRun ? ` with the test ${testToRun}` : ""}; make it work and make the test pass.)`,
       },
       { cwd, config: cfg, chat: deps.chat, pi: deps.pi, report: say, env, runTests: deps.runTests, lint: deps.lint, keepUndo: true, progress: fp },
     ).finally(() => fp.end());
-    const ok = fix.solvedBy !== "none";
-    return res(ok, target, testToRun ?? null, changed(), fix);
+    if (fix.solvedBy !== "none") return res(true, target, testToRun ?? null, changed(), fix);
+    // the hand-over ended without a passing test: leave nothing of /add behind
+    const r = undo(`${notApplied ? `${notApplied}; ` : ""}the ladder ended without a passing test`);
+    return { ...r, fix };
   };
 
+  // the code edit itself did not land (the reply may still have written a test: it would import code that is not there)
+  const notApplied = wroteTarget ? "" : `the code edit didn't apply to ${target}: ${whyNotApplied(applied, target)}`;
   if (!applied.applied.length) return handOver("no edit could be applied");
+  if (notApplied) return handOver(notApplied);
 
   pg.step("test");
-  const t = await tests({ cwd, test: testToRun, config: cfg.test });
+  let t = await tests({ cwd, test: testToRun, config: cfg.test });
   say(`test ${testToRun ?? "(suite)"}: ${t.ok ? "pass" : "fail"}`);
+  if (!t.ok && wroteTest && isCollectionError(t.text)) {
+    // a new test that does not even import or parse is /add's own failure: one retry with the error, else undo
+    say(`the new test fails at collection: ${testToRun}; retrying once with the error`);
+    pg.step("write");
+    const retry = await call("edit", [
+      { role: "system", content: ADD_RULES },
+      { role: "user", content: `${parts.join("\n\n")}\n\nTask:\n${args.task}\n${testLine}\n\nEdit blocks only.` },
+      { role: "assistant", content: reply },
+      {
+        role: "user",
+        content:
+          `New test fails before running (import or syntax error). Applied: ${JSON.stringify(applied.applied)}.\n${t.text}\n\n` +
+          "Corrected edit blocks against current files (fix the test file or the code it imports).",
+      },
+    ]);
+    const again = await applyReply(retry, { cwd, protected: [], maxWholeFileLines: 400 });
+    for (const f of again.applied) pg.touch(f);
+    say(`applied: ${JSON.stringify(again.applied)}${again.failed.length ? `; not applied: ${JSON.stringify(again.failed)}` : ""}`);
+    t = await tests({ cwd, test: testToRun, config: cfg.test });
+    say(`test ${testToRun ?? "(suite)"}: ${t.ok ? "pass" : "fail"}`);
+    if (!t.ok && isCollectionError(t.text)) return undo(`the new test still fails at collection (${t.text.split("\n").find((l) => /^E\s/.test(l))?.slice(0, 150).trim() ?? "import or syntax error"})`);
+  }
   if (!t.ok) return handOver("the test fails");
 
   pg.step("lint");

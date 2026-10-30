@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { tmpDir } from "./tmpdir.ts";
 import {
   Masker,
+  workingSet,
   RepeatGuard,
   TurnCap,
   canonicalJson,
@@ -17,7 +18,9 @@ import {
   Todo,
   TODO_NOOP,
   approxTokens,
+  contextTokens,
   oversizeReason,
+  readCutMarker,
   tailText,
   toolCallVerdict,
   withTail,
@@ -36,7 +39,7 @@ const load = (n: string): Fixture => JSON.parse(readFileSync(new URL(n, dir), "u
 const names = readdirSync(dir).filter((f) => f.endsWith(".json"));
 
 /** A temp call log so step_back rows never touch the real one. */
-const tmpEnv = () => ({ TINYCODE_LOG: join(mkdtempSync(join(tmpdir(), "tc-")), "c.jsonl") });
+const tmpEnv = () => ({ TINYCODE_LOG: join(tmpDir("tc-"), "c.jsonl") });
 
 /**
  * Feed a recorded call sequence through the real pre-call rules (toolCallVerdict). Indices are 1-based. A window's
@@ -153,7 +156,7 @@ test("view cap: read without limit gets viewLines; an explicit limit stays", () 
 });
 
 test("result cap: head + tail + pointer, full text saved; within the cap untouched", () => {
-  const d = mkdtempSync(join(tmpdir(), "tinycode-obs-"));
+  const d = tmpDir("tinycode-obs-");
   const env = { TINYCODE_LOG: join(d, "calls.jsonl") };
   const save = obsSaver("sess1", env);
   assert.equal(capText("short", { toolResultTokens: 1500 }, save), null);
@@ -161,7 +164,7 @@ test("result cap: head + tail + pointer, full text saved; within the cap untouch
   const out = capText(big, { toolResultTokens: 1500 }, save) as string;
   assert.ok(out.length < 6400, `capped length ${out.length}`);
   assert.ok(out.startsWith("line 0\n") && out.endsWith("line 1999"));
-  const m = out.match(/full output saved to (.+?) \.\.\.\]/);
+  const m = out.match(/full output in (.+?) \.\.\.\]/);
   assert.ok(m);
   assert.equal(readFileSync(m[1], "utf8"), big);
   assert.ok(m[1].includes(join("obs", "sess1", "1.txt")));
@@ -176,7 +179,7 @@ function convo(n: number, tokens: number): Msg[] {
   return msgs;
 }
 
-test("masking: 10 results of 1k tokens mask in two batches, not ten times; newest 2 untouched; prefix stable", () => {
+test("masking: 10 reads of 1k tokens mask in one batch, not ten times; the 3-file working set untouched; prefix stable", () => {
   const m = new Masker(3000, 2);
   const seen: string[] = [];
   let fired = 0;
@@ -186,19 +189,19 @@ test("masking: 10 results of 1k tokens mask in two batches, not ten times; newes
     if (m.batches !== prevBatches) fired++;
     prevBatches = m.batches;
     const results = out.filter((x) => x.role === "toolResult");
-    for (const r of results.slice(-2)) assert.ok(!String((r.content as { text: string }[])[0].text).startsWith("[masked"), `turn ${turn}: newest 2 untouched`);
+    for (const r of results.slice(-3)) assert.ok(!String((r.content as { text: string }[])[0].text).startsWith("[masked"), `turn ${turn}: working set untouched`);
     // monotonic: a masked placeholder never reverts
     const now = results.map((r) => String((r.content as { text: string }[])[0].text).startsWith("[masked")).join("");
     seen.push(now);
   }
   console.log(`mask batches ${fired} in 10 turns (per-turn masking would be 10)`);
-  assert.equal(fired, 2);
+  assert.equal(fired, 1); // files 1-4 (4k > 3000) at turn 7; files 5-7 (3k) never cross it again
   for (let i = 1; i < seen.length; i++) {
     for (let j = 0; j < seen[i - 1].length; j++) if (seen[i - 1][j] === "1") assert.equal(seen[i][j], "1");
   }
   const last = m.apply(convo(10, 1000)) as Msg[];
   const ph = (last.find((x) => x.toolCallId === "c1")?.content as { text: string }[])[0].text;
-  assert.equal(ph, "[masked: read f1.py, 2000 lines; see your notes]");
+  assert.equal(ph, "[masked: read f1.py, 2000 lines; see notes]");
 });
 
 test("masking: nothing masked returns undefined; default threshold 6000 fires once in 10 turns", () => {
@@ -223,7 +226,7 @@ test("call budget: 0 means none; over a cap it only says so, and tool calls get 
   lim.turns.turnStarted();
   const v = toolCallVerdict(lim, DEFAULTS.limits, "bash", { command: "ls" }, env());
   assert.equal(v.action, "block");
-  assert.match((v as { reason: string }).reason, /final answer now/);
+  assert.match((v as { reason: string }).reason, /Final answer now/);
 });
 
 test("createLimits: newRun resets guard and turn counter and sets a rung-3 cap", () => {
@@ -249,8 +252,8 @@ test("todo tool: replace-whole, limits, and the tail text", () => {
   assert.equal(t.format(), "");
   const r = t.set({ steps: [{ text: "read app.py", done: true }, { text: "edit README" }], notes: ["MAX_BATCH_SIZE = 1000 at app.py:42"] });
   assert.equal(r.ok, true);
-  assert.match(r.text, /1\/2 steps done, 1 notes/);
-  assert.equal(t.format(), "[your todo]\n1. [x] read app.py\n2. [ ] edit README\n[your notes]\n- MAX_BATCH_SIZE = 1000 at app.py:42");
+  assert.match(r.text, /1\/2 done, 1 notes/);
+  assert.equal(t.format(), "[todo]\n1. [x] read app.py\n2. [ ] edit README\n[notes]\n- MAX_BATCH_SIZE = 1000 at app.py:42");
   // replace-whole: the second call drops the first list
   t.set({ steps: [{ text: "only" }] });
   assert.deepEqual(t.steps, [{ text: "only", done: false }]);
@@ -270,7 +273,7 @@ test("tail: appended last as a user message, prefix untouched; empty todo nudges
   const user: Msg = { role: "user", content: [{ type: "text", text: "do it" }] };
   const res: Msg = { role: "toolResult", toolCallId: "1", toolName: "read", content: [{ type: "text", text: "x" }] };
   assert.equal(withTail([user], t, false), undefined, "nothing to say on the first turn");
-  assert.match(tailText(t, false, 1) as string, /todo is empty/);
+  assert.match(tailText(t, false, 1) as string, /todo empty/);
   t.set({ steps: [{ text: "a" }], notes: ["n1"] });
   const msgs = [user, res];
   const out = withTail(msgs, t, false) as Msg[];
@@ -278,12 +281,11 @@ test("tail: appended last as a user message, prefix untouched; empty todo nudges
   assert.equal(out[0], user);
   assert.equal(out[1], res);
   assert.equal(out[2].role, "user");
-  assert.match((out[2].content as { text: string }[])[0].text, /\[your todo\]\n1\. \[ \] a\n\[your notes\]\n- n1/);
+  assert.match((out[2].content as { text: string }[])[0].text, /\[todo\]\n1\. \[ \] a\n\[notes\]\n- n1/);
   assert.equal(msgs.length, 2, "input list not mutated");
   // the output-limit notice comes first and says so explicitly
   const lim = (withTail(msgs, t, true) as Msg[])[2].content as { text: string }[];
-  assert.match(lim[0].text, /^\[your last reply hit the output limit/);
-  assert.match(lim[0].text, /smaller pieces/);
+  assert.ok(lim[0].text.startsWith("Last reply cut at output limit. Shorter reply, smaller edits."));
 });
 
 test("memory prompt: fixed text, 150 tokens at most", () => {
@@ -298,9 +300,13 @@ test("mask stub says to see the notes and names the read window", () => {
     msgs.push({ role: "assistant", content: [{ type: "toolCall", id: `c${i}`, name: "read", arguments: { path: "README.html", offset: off } }] });
     msgs.push({ role: "toolResult", toolCallId: `c${i}`, toolName: "read", content: [{ type: "text", text: "line\n".repeat(200) }] });
   }
+  for (const f of ["x.py", "y.py", "z.py"]) { // three later files push README.html out of the working set
+    msgs.push({ role: "assistant", content: [{ type: "toolCall", id: f, name: "read", arguments: { path: f } }] });
+    msgs.push({ role: "toolResult", toolCallId: f, toolName: "read", content: [{ type: "text", text: "line\n".repeat(200) }] });
+  }
   const out = m.apply(msgs) as Msg[];
-  assert.equal((out[1].content as { text: string }[])[0].text, "[masked: read README.html from line 1, 200 lines; see your notes]");
-  assert.match((out[3].content as { text: string }[])[0].text, /from line 101, 200 lines; see your notes/);
+  assert.equal((out[1].content as { text: string }[])[0].text, "[masked: read README.html from line 1, 200 lines; see notes]");
+  assert.match((out[3].content as { text: string }[])[0].text, /from line 101, 200 lines; see notes/);
 });
 
 test("read memory: the first re-read gets a pointer to the notes, the second is served; a changed window is served at once", () => {
@@ -314,7 +320,7 @@ test("read memory: the first re-read gets a pointer to the notes, the second is 
   assert.equal(read({ path: "b.py" }).action, "allow");
   const again = read({ path: "a.html" });
   assert.equal(again.action, "block");
-  assert.match((again as { reason: string }).reason, /You read this at turn 0; check your notes/);
+  assert.match((again as { reason: string }).reason, /Unchanged since your read at turn 0; that result is still above/);
   fill("c", "d", "e", "f");
   assert.equal(read({ path: "a.html" }).action, "allow", "asking again serves it: never refused twice");
   fill("g", "h", "i", "j");
@@ -369,7 +375,7 @@ test("repeat: nudge on the third identical call (served, tail note added); a rep
   assert.deepEqual(lim.tailNotes, []);
   assert.equal(run().action, "allow", "the third is served");
   assert.equal(lim.tailNotes.length, 1);
-  assert.match(lim.tailNotes[0], /same call as the last two; try a different approach or update your todo/);
+  assert.match(lim.tailNotes[0], /same call 3 times; change approach or update todo/);
   assert.equal(lim.interventions, 1);
   assert.equal(lim.stepped, false);
   assert.equal(run().action, "allow");
@@ -377,15 +383,15 @@ test("repeat: nudge on the third identical call (served, tail note added); a rep
   assert.match(lim.stepBackReason as string, /repeat continued/);
   // the nudge reaches the model as a tail message
   const tail = withTail([{ role: "user", content: [{ type: "text", text: "go" }] }], lim.todo, false, lim.tailNotes.splice(0)) as Msg[];
-  assert.match((tail[1].content as { text: string }[])[0].text, /same call as the last two/);
+  assert.match((tail[1].content as { text: string }[])[0].text, /same call 3 times/);
 });
 
 test("oversized edit/write: refused with 'split into smaller edits' until step-back (3 interventions)", () => {
   const small = { path: "a", edits: [{ oldText: "x", newText: "y".repeat(8000) }] }; // ~2000 tokens
   const big = { path: "a", edits: [{ oldText: "x", newText: "y".repeat(7000) }, { oldText: "z", newText: "y".repeat(7000) }] }; // ~3500
   assert.equal(oversizeReason("edit", small, 3000), null);
-  assert.match(oversizeReason("edit", big, 3000) as string, /Split it into smaller edits/);
-  assert.match(oversizeReason("write", { path: "a", content: "y".repeat(13000) }, 3000) as string, /Split it/);
+  assert.match(oversizeReason("edit", big, 3000) as string, /Split: ~40 lines each/);
+  assert.match(oversizeReason("write", { path: "a", content: "y".repeat(13000) }, 3000) as string, /Split: ~40 lines each/);
   assert.equal(oversizeReason("read", big, 3000), null);
   const lim = createLimits(DEFAULTS.limits, "t-big", tmpEnv());
   const call = () => toolCallVerdict(lim, DEFAULTS.limits, "edit", structuredClone(big), env());
@@ -403,7 +409,7 @@ test("tail: one nudge after a read, none after other tools", () => {
   const rr: Msg = { role: "toolResult", toolCallId: "1", toolName: "read", content: [{ type: "text", text: "x" }] };
   const bb: Msg = { role: "toolResult", toolCallId: "2", toolName: "bash", content: [{ type: "text", text: "x" }] };
   const txt = (m: Msg[]) => ((withTail(m, t, false) as Msg[]).at(-1)?.content as { text: string }[])[0].text;
-  assert.match(txt([user, rr]), /\[note what you learned in your todo\]$/);
+  assert.match(txt([user, rr]), /\[note findings in todo\]$/);
   assert.doesNotMatch(txt([user, rr, bb]), /note what you learned/);
 });
 
@@ -423,11 +429,11 @@ test("todo: a save that changes nothing is a no-op with its own message; a real 
   const input = { steps: [{ text: "a", done: true }, { text: "b" }], notes: ["n1"] };
   assert.equal(t.isNoop(input), false);
   const first = t.set(input);
-  assert.match(first.text, /^Saved: 1\/2 steps done, 1 notes\.$/);
+  assert.match(first.text, /^Saved: 1\/2 done, 1 notes\.$/);
   assert.equal(t.isNoop(structuredClone(input)), true);
   const again = t.set(structuredClone(input));
   assert.deepEqual(again, { ok: true, noop: true, text: TODO_NOOP });
-  assert.match(again.text, /^no change: your todo is already saved; continue with the next step or finish$/);
+  assert.match(again.text, /^no change; todo saved\. Next step or finish$/);
   assert.equal(t.isNoop({ steps: [{ text: "a", done: true }, { text: "b", done: true }], notes: ["n1"] }), false);
   assert.equal(t.isNoop({ steps: input.steps, notes: ["n1", "n2"] }), false);
   const changed = t.set({ steps: [{ text: "a", done: true }, { text: "b", done: true }], notes: ["n1"] });
@@ -451,9 +457,213 @@ test("todo: a replay of 10 identical saves nudges at the 3rd and steps back at t
     texts.push(lim.todo.set(structuredClone(input)).text);
   }
   assert.match(texts[0]!, /^Saved/);
-  for (const x of texts.slice(1)) assert.equal(x, TODO_NOOP);
+  for (const x of texts.slice(1, 3)) assert.equal(x, TODO_NOOP);
+  assert.equal(texts[3], 'no change 3x; todo saved. Open: "b". Do it with read/edit/bash, or finish.');
   assert.equal(nudge, 3);
   assert.equal(step, 4);
-  // after the step-back the tool itself still answers "no change"
-  assert.equal(lim.todo.set(structuredClone(input)).text, TODO_NOOP);
+  // after the step-back the tool itself still answers, naming the open step (a nudge, never a block)
+  assert.equal(lim.todo.set(structuredClone(input)).text, 'no change 10x; todo saved. Open: "b". Do it with read/edit/bash, or finish.');
+  // a real change starts the count again
+  assert.match(lim.todo.set({ steps: [{ text: "a", done: true }, { text: "b", done: true }, { text: "c" }], notes: ["x"] }).text, /^Saved/);
+  assert.equal(lim.todo.set({ steps: [{ text: "a", done: true }, { text: "b", done: true }, { text: "c" }], notes: ["x"] }).text, TODO_NOOP);
+});
+
+// ---- pressure masking: a long session whose results are small but whose own replies and call arguments are big
+
+function pressureConvo(n: number, scriptChars = 3000): Msg[] {
+  const msgs: Msg[] = [{ role: "user", content: "do it" }];
+  for (let i = 1; i <= n; i++) {
+    msgs.push({
+      role: "assistant",
+      timestamp: i,
+      content: [
+        { type: "text", text: `step ${i}: ` + "explaining at length. ".repeat(60) },
+        { type: "toolCall", id: `c${i}`, name: "bash", arguments: { command: "print('x')\n".repeat(scriptChars / 11), timeout: 30 } },
+      ],
+    });
+    msgs.push({ role: "toolResult", toolCallId: `c${i}`, toolName: "bash", content: [{ type: "text", text: "ok\n".repeat(50) }] });
+  }
+  return msgs;
+}
+const textOf = (m: Msg) => (m.content as { type: string; text?: string }[]).map((p) => p.text ?? "").join("");
+
+test("pressure: over pressureAt masks old results, long call arguments and long replies; newest 2 untouched", () => {
+  const m = new Masker(1e9, 2, 0.7, 400);
+  const msgs = pressureConvo(10);
+  const before = approxTokens(msgs.reduce((s, x) => s + JSON.stringify(x.content).length, 0));
+  const out = m.apply(msgs, { windowTokens: Math.floor(before / 0.8), systemChars: 0 }) as Msg[];
+  assert.ok(out, "fires");
+  assert.equal(m.pressureBatches, 1);
+  assert.ok(m.lastPressure && m.lastPressure.tokensAfter < m.lastPressure.tokensBefore / 2);
+  const asst = out.filter((x) => x.role === "assistant");
+  const call = (asst[0].content as { type: string; arguments?: { command: string; timeout: number }; id?: string }[]).find((p) => p.type === "toolCall")!;
+  assert.equal(call.id, "c1");
+  assert.equal(call.arguments!.timeout, 30);
+  assert.match(call.arguments!.command, /^\[masked: \d+ lines; see notes\]$/);
+  assert.match(textOf(asst[0]), /\[…cut\]$/);
+  assert.ok(textOf(asst[0]).length < 250);
+  // newest 2 assistant messages and results stay whole
+  assert.equal(JSON.stringify(asst.slice(-2)), JSON.stringify(msgs.filter((x) => x.role === "assistant").slice(-2)));
+  const res = out.filter((x) => x.role === "toolResult");
+  assert.match(textOf(res[0]), /^\[masked: bash/);
+  assert.ok(!textOf(res[res.length - 1]).startsWith("[masked"));
+});
+
+test("pressure: under the threshold nothing changes; off (0) never fires", () => {
+  const msgs = pressureConvo(10);
+  assert.equal(new Masker(1e9, 2, 0.7, 400).apply(msgs, { windowTokens: 1_000_000, systemChars: 0 }), undefined);
+  const off = new Masker(1e9, 2, 0, 400);
+  assert.equal(off.apply(msgs, { windowTokens: 1000, systemChars: 0 }), undefined);
+  assert.equal(new Masker(1e9, 2, 0.7, 400).apply(msgs), undefined, "no context given: no pressure");
+});
+
+test("pressure: monotonic across calls, and a later batch only touches what is newly old", () => {
+  const m = new Masker(1e9, 2, 0.7, 400);
+  const w = { windowTokens: 9000, systemChars: 0 };
+  const a = m.apply(pressureConvo(10), w) as Msg[];
+  assert.equal(m.pressureBatches, 1);
+  // the same list again (under pressure now, masked): same output, no new batch
+  const b = m.apply(pressureConvo(10), w) as Msg[];
+  assert.equal(JSON.stringify(a), JSON.stringify(b));
+  assert.equal(m.pressureBatches, 1);
+  assert.equal(m.lastPressure, null);
+  // a larger window: the earlier masking stays even though pressure is gone
+  const c = m.apply(pressureConvo(10), { windowTokens: 10_000_000, systemChars: 0 }) as Msg[];
+  assert.equal(JSON.stringify(a), JSON.stringify(c));
+});
+
+test("pressure: createLimits logs one pressure_mask record; stepped back masks nothing", () => {
+  const env = tmpEnv();
+  const lim = createLimits({ ...DEFAULTS.limits, maskAboveTokens: 1e9 }, "t-pressure", env);
+  const out = lim.mask(pressureConvo(10) as never, { windowTokens: 9000, systemChars: 0 });
+  assert.ok(out);
+  const rows = readFileSync(env.TINYCODE_LOG, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].step, "pressure_mask");
+  const lim2 = createLimits(DEFAULTS.limits, "t-pressure2", tmpEnv());
+  lim2.stepBack("test");
+  assert.equal(lim2.mask(pressureConvo(10) as never, { windowTokens: 9000, systemChars: 0 }), undefined);
+});
+
+// ---- the normal batch also shortens old replies and arguments (operator 2026-10-29)
+
+test("normal batch: long arguments and replies in assistant messages older than the newest 2 are shortened with the results, in one batch", () => {
+  assert.equal(DEFAULTS.limits.maskAboveTokens, 1500);
+  const m = new Masker(DEFAULTS.limits.maskAboveTokens, 2, 0, 400);
+  // small results, big replies/arguments: only the assistant side adds up past the threshold
+  const msgs = pressureConvo(10);
+  const out = m.apply(msgs) as Msg[];
+  assert.ok(out, "fires without any pressure context");
+  assert.equal(m.batches, 1);
+  assert.equal(m.pressureBatches, 0);
+  const asst = out.filter((x) => x.role === "assistant");
+  const call = (asst[0].content as { type: string; arguments?: { command: string } }[]).find((p) => p.type === "toolCall")!;
+  assert.match(call.arguments!.command, /^\[masked: \d+ lines; see notes\]$/);
+  assert.match(textOf(asst[0]), /\[…cut\]$/);
+  assert.equal(JSON.stringify(asst.slice(-2)), JSON.stringify(msgs.filter((x) => x.role === "assistant").slice(-2)), "newest 2 stay whole");
+  // monotonic and batched: the same list gives the same output and no new batch; one more turn does not re-fire for the old ones
+  assert.equal(JSON.stringify(m.apply(pressureConvo(10))), JSON.stringify(out));
+  assert.equal(m.batches, 1);
+  const more = m.apply(pressureConvo(11)) as Msg[];
+  assert.equal(m.batches, 1, "one newly old message is below the threshold");
+  const first = (more.filter((x) => x.role === "assistant")[0].content as { type: string; arguments?: { command: string } }[]).find((p) => p.type === "toolCall")!;
+  assert.match(first.arguments!.command, /^\[masked/);
+});
+
+test("normal batch: below the threshold nothing is touched; short replies are never shortened", () => {
+  const m = new Masker(1500, 2, 0, 400);
+  assert.equal(m.apply(pressureConvo(3)), undefined, "one old message adds up to less than 1500 tokens");
+  const short: Msg[] = [{ role: "user", content: "x" }];
+  for (let i = 1; i <= 8; i++) short.push({ role: "assistant", timestamp: i, content: [{ type: "toolCall", id: `c${i}`, name: "bash", arguments: { command: "ls" } }] }, { role: "toolResult", toolCallId: `c${i}`, toolName: "bash", content: [{ type: "text", text: "ok" }] });
+  assert.equal(m.apply(short), undefined);
+});
+
+// ---- pressure from the real prompt size (the last call's usage), not chars/4
+
+test("pressure: the last call's real usage crosses the threshold although chars/4 does not", () => {
+  const usage = { input: 21000, output: 200, cacheRead: 2000, cacheWrite: 0 };
+  const msgs: Msg[] = [{ role: "user", content: "do it" }];
+  for (let i = 1; i <= 6; i++) {
+    msgs.push({ role: "assistant", timestamp: i, content: [{ type: "toolCall", id: `c${i}`, name: "bash", arguments: { command: "x".repeat(500) } }], ...(i === 6 ? { usage } : {}) });
+    msgs.push({ role: "toolResult", toolCallId: `c${i}`, toolName: "bash", content: [{ type: "text", text: "ok\n".repeat(20) }] });
+  }
+  const window = 32768;
+  const chars = approxTokens(msgs.reduce((s, x) => s + JSON.stringify(x.content).length, 0));
+  assert.ok(chars < 0.7 * window / 3, `chars/4 estimate ${chars} is far below the line`);
+  assert.equal(contextTokens(msgs), 21000 + 2000 + 200 + approxTokens(20 * 3 + 0), "usage + chars/4 of what came after");
+  const m = new Masker(1e9, 2, 0.7, 400);
+  const out = m.apply(msgs, { windowTokens: window, systemChars: 0 });
+  assert.ok(out, "fires: 23.2k real tokens is over 0.7 x 32768 = 22.9k");
+  assert.equal(m.pressureBatches, 1);
+  assert.ok(m.lastPressure && m.lastPressure.tokensBefore > 0.7 * window);
+  // the same list without usage would not have fired
+  const bare = msgs.map((x) => { const { usage: _u, ...rest } = x; return rest as Msg; });
+  assert.equal(new Masker(1e9, 2, 0.7, 400).apply(bare, { windowTokens: window, systemChars: 0 }), undefined);
+});
+
+test("pressure: the active batch's savings are taken off the real size before the pressure line is checked", () => {
+  const usage = { input: 23000, output: 100, cacheRead: 0, cacheWrite: 0 };
+  const msgs = pressureConvo(10).map((x, i, all) => (i === all.length - 2 ? { ...x, usage } : x));
+  // the active batch (threshold 1500) shortens ~8 big old messages: that alone brings 23.1k below 22.9k
+  const m = new Masker(1500, 2, 0.7, 400);
+  m.apply(msgs, { windowTokens: 32768, systemChars: 0 });
+  assert.equal(m.batches, 1);
+  assert.equal(m.pressureBatches, 0, "no second batch: the estimate already counts what the first took out");
+});
+
+// ---- a cut read says so; a workflow's fresh file is served whole
+
+test("readCutMarker: Pi's notices become one explicit line; a complete read has none", () => {
+  const body = "a\nb";
+  assert.equal(readCutMarker(`${body}\n\n[16 more lines in file. Use offset=101 to continue.]`, {}), `${body}\n[lines 1-100 of 116; file continues: read offset=101]`);
+  assert.equal(readCutMarker(`${body}\n\n[8 more lines in file. Use offset=51 to continue.]`, { offset: 21 }), `${body}\n[lines 21-50 of 58; file continues: read offset=51]`);
+  assert.equal(readCutMarker(`${body}\n\n[Showing lines 1-2000 of 3000 (50.0KB limit). Use offset=2001 to continue.]`, {}), `${body}\n[lines 1-2000 of 3000; file continues: read offset=2001]`);
+  assert.equal(readCutMarker("a\nb\nc", {}), null);
+});
+
+test("fresh file: the first read of a file a workflow wrote is served whole (no view cap, no result cap); later reads and big files are capped", () => {
+  const lim = createLimits(DEFAULTS.limits, "t-fresh", tmpEnv());
+  const lines: Record<string, number> = { "/w/bowling.py": 116, "/w/big.py": 900 };
+  const env = { resolvePath: (p: string) => `/w/${p}`, windowHash: () => "h", lineCount: (p: string) => lines[p] ?? -1 };
+  lim.fresh.add("/w/bowling.py");
+  lim.fresh.add("/w/big.py");
+  const a: Record<string, unknown> = { path: "bowling.py" };
+  const v = toolCallVerdict(lim, DEFAULTS.limits, "read", a, env);
+  assert.deepEqual(v, { action: "allow", whole: true });
+  assert.equal("limit" in a, false, "no view cap on a fresh file");
+  const b: Record<string, unknown> = { path: "big.py" };
+  assert.deepEqual(toolCallVerdict(lim, DEFAULTS.limits, "read", b, env), { action: "allow" });
+  assert.equal(b.limit, DEFAULTS.limits.viewLines, "over freshFileLines: the normal cap");
+  const again: Record<string, unknown> = { path: "bowling.py" };
+  toolCallVerdict(lim, DEFAULTS.limits, "read", again, env);
+  assert.equal(again.limit, DEFAULTS.limits.viewLines, "only the first read");
+});
+
+test("working set: the latest read of each window and the latest workflow result are never masked", () => {
+  const call = (id: string, name: string, args: Record<string, unknown>): Msg => ({ role: "assistant", content: [{ type: "toolCall", id, name, arguments: args }] }) as Msg;
+  const res = (id: string, name: string, n: number): Msg => ({ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: "x\n".repeat(n) }] }) as Msg;
+  const msgs: Msg[] = [
+    { role: "user", content: "fix it" } as Msg,
+    call("f", "fix", { task: "t" }), res("f", "fix", 400),
+    call("r1", "read", { path: "a.py" }), res("r1", "read", 3000),
+    call("r2", "read", { path: "a.py" }), res("r2", "read", 3000),
+    call("t", "read", { path: "a_test.py" }), res("t", "read", 3000),
+  ];
+  for (let i = 0; i < 6; i++) msgs.push(call(`b${i}`, "bash", { command: `echo ${i}` }), res(`b${i}`, "bash", 3000));
+  assert.deepEqual([...workingSet(msgs)].sort(), ["f", "r2", "t"]);
+  const out = new Masker(1500, 2).apply(msgs) as Msg[];
+  const text = (id: string) => String(((out.find((x) => x.toolCallId === id)?.content) as { text: string }[])[0].text);
+  for (const id of ["f", "r2", "t"]) assert.ok(!text(id).startsWith("[masked"), `${id} kept`);
+  for (const id of ["r1", "b0", "b1"]) assert.ok(text(id).startsWith("[masked"), `${id} masked`);
+});
+
+test("pressure: ceilingTokens lowers the line below pressureAt x window (Pi's clamp), never raises it", () => {
+  const msgs = pressureConvo(10);
+  const tokens = approxTokens(msgs.reduce((s, x) => s + JSON.stringify(x.content).length, 0));
+  const window = Math.ceil(tokens / 0.6); // 60 % full: under pressureAt 0.7
+  assert.equal(new Masker(1e9, 2, 0.7, 400).apply(msgs, { windowTokens: window, systemChars: 0 }), undefined);
+  const capped = new Masker(1e9, 2, 0.7, 400);
+  assert.ok(capped.apply(msgs, { windowTokens: window, systemChars: 0, ceilingTokens: Math.floor(tokens * 0.8) }), "over the ceiling: fires");
+  assert.equal(capped.pressureBatches, 1);
+  assert.equal(new Masker(1e9, 2, 0.7, 400).apply(msgs, { windowTokens: window, systemChars: 0, ceilingTokens: tokens * 10 }), undefined, "a high ceiling changes nothing");
 });
