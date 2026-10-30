@@ -138,6 +138,13 @@ removes everything (add `--purge` to delete your settings and logs too). Open a 
 
 ### Models
 
+Which model for what, from our runs on a 16 GB card:
+
+- **Working with Pi yourself: gpt-oss-20b.** It solved a little less, but about four times faster (median 55 s per
+  solved task), which matters when you are waiting.
+- **Handing jobs to a local model from another agent: Qwen3.6-35B-A3B.** It solved the most (10 of 15 with tinyCode),
+  slower but steadier; nobody is waiting on a delegated job.
+
 The models in the tested setups, with the file each run used:
 
 | Card | Model | File |
