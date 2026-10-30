@@ -2,9 +2,9 @@
 
 | Card | Model (why we picked it) | Pi alone | Pi + tinyCode |
 |---|---|---|---|
-| 16 GB (Tesla T4) | gpt-oss-20b (best coder that fits) | 3 of 14 | **8 of 13** |
+| 16 GB (Tesla T4) | gpt-oss-20b (best coder that fits) | 3 of 15 | **8 of 15** |
 | 16 GB (Tesla T4) | Qwen3.6-35B-A3B (popular reference) | 4 of 14 | **10 of 13** |
-| 8 GB (Quadro P4000) | Nemotron-Nano-9B-v2 (best coder that fits) | 0 of 3 | **0 of 2** |
+| 8 GB (Quadro P4000) | Nemotron-Nano-9B-v2 (best coder that fits) | 0 of 4 | **0 of 3** |
 
 In the tables below each mark is one run, in order: ✓ pass with its time in seconds, ✗ fail, · not run yet.
 
@@ -18,8 +18,8 @@ Tesla T4, MXFP4, 12.1 GB, 16k window, 16-bit cache. Fast: about 50 tokens/s on t
 | [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | bowling scorer (31) | ✗ ✗ ✗ | ✗ ✗ ✗ |
 | [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | ✓64 ✓52 ✗ | ✓44 ✓50 ✓60 |
 | [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | ✗ ✗ ✗ | ✗ ✓152 ✗ |
-| [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | ✗ ✗ · | ✓154 · · |
-| **Total** | solved (median s) | **3 of 14** (52 s) | **8 of 13** (55 s) |
+| [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | ✗ ✗ ✗ | ✓154 ✗ ✗ |
+| **Total** | solved (median s) | **3 of 15** (52 s) | **8 of 15** (55 s) |
 
 ### 16 GB · Qwen3.6-35B-A3B
 
@@ -42,12 +42,12 @@ Quadro P4000, Q4_K_M, 6.5 GB, 16k window, 8-bit cache. Fits 8 GB with room to sp
 |---|---|---|---|
 | [connect](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/connect) | Hex game winner (10) | ✗ · · | ✗ · · |
 | [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | bowling scorer (31) | ✗ · · | ✗ · · |
-| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | ✗ · · | · · · |
-| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | · · · | · · · |
+| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | ✗ · · | ✗ · · |
+| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | ✗ · · | · · · |
 | [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | · · · | · · · |
-| **Total** | solved (median s) | **0 of 3** (–) | **0 of 2** (–) |
+| **Total** | solved (median s) | **0 of 4** (–) | **0 of 3** (–) |
 
-Runs that stopped to ask a question instead of acting (they count as fails): Pi alone 2 of 3, Pi + tinyCode 0 of 2.
+Runs that stopped to ask a question instead of acting (they count as fails): Pi alone 3 of 4, Pi + tinyCode 0 of 3.
 
 ## Method
 
@@ -100,7 +100,10 @@ Runs that stopped to ask a question instead of acting (they count as fails): Pi 
 | paasio | Pi + tinyCode | 3 | fail | 25 failed | 90 s | 14 | 6.4k | 4042 |
 | sgf-parsing | Pi alone | 1 | fail | 4 failed, 19 passed | 44 s | 6 | 6.3k | 1944 |
 | sgf-parsing | Pi alone | 2 | fail | 8 failed, 15 passed | 66 s | 6 | 6.9k | 3047 |
+| sgf-parsing | Pi alone | 3 | fail | 16 failed, 7 passed | 32 s | 5 | 8.1k | 1200 |
 | sgf-parsing | Pi + tinyCode | 1 | pass | 23 passed | 154 s | 26 | 10.0k | 6289 |
+| sgf-parsing | Pi + tinyCode | 2 | fail | 1 failed, 22 passed | 292 s | 42 | 10.1k | 12794 |
+| sgf-parsing | Pi + tinyCode | 3 | fail | 2 failed, 21 passed | 314 s | 46 | 8.8k | 13558 |
 
 ### 16 GB, Qwen3.6-35B-A3B (UD-IQ3_XXS, 13.2 GB, 16k window, 16-bit cache)
 
@@ -143,3 +146,5 @@ Runs that stopped to ask a question instead of acting (they count as fails): Pi 
 | bowling | Pi alone | 1 | fail | 9 failed, 22 passed | 62 s | 2 | 3.3k | 1105 |
 | bowling | Pi + tinyCode | 1 | time cap | 27 failed, 4 passed | 10.0 min | 47 | 10.1k | 9941 |
 | dot-dsl | Pi alone | 1 | context full | 12 failed | 351 s | 25 | 12.3k | 6544 |
+| dot-dsl | Pi + tinyCode | 1 | time cap | 11 failed, 1 passed | 10.0 min | 68 | 10.1k | 9582 |
+| paasio | Pi alone | 1 | fail | 25 failed | 10 s | 1 | 1.6k | 57 |
