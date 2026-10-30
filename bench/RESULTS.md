@@ -3,8 +3,8 @@
 | Card | Model (why we picked it) | Pi alone | Pi + tinyCode |
 |---|---|---|---|
 | 16 GB (Tesla T4) | gpt-oss-20b (best coder that fits) | 3 of 15 | **8 of 15** |
-| 16 GB (Tesla T4) | Qwen3.6-35B-A3B (popular reference) | 4 of 14 | **10 of 13** |
-| 8 GB (Quadro P4000) | Nemotron-Nano-9B-v2 (best coder that fits) | 0 of 4 | **0 of 3** |
+| 16 GB (Tesla T4) | Qwen3.6-35B-A3B (popular reference) | 4 of 15 | **10 of 15** |
+| 16 GB (Tesla T4) | Nemotron-Nano-9B-v2 (best coder for 8 GB cards; run here for speed) | 0 of 1 | **0 of 0** |
 
 In the tables below each mark is one run, in order: ✓ pass with its time in seconds, ✗ fail, · not run yet.
 
@@ -31,23 +31,23 @@ Tesla T4, UD-IQ3_XXS, 13.2 GB, 16k window, 16-bit cache. Talkative: on connect, 
 | [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | bowling scorer (31) | ✗ ✗ ✗ | ✗ ✗ ✓327 |
 | [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | ✓76 ✗ ✗ | ✓198 ✓36 ✓70 |
 | [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | ✓46 ✓64 ✓48 | ✓204 ✓298 ✓377 |
-| [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | ✗ ✗ · | ✗ · · |
-| **Total** | solved (median s) | **4 of 14** (56 s) | **10 of 13** (201 s) |
+| [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | ✗ ✗ ✗ | ✗ ✗ ✗ |
+| **Total** | solved (median s) | **4 of 15** (56 s) | **10 of 15** (201 s) |
 
-### 8 GB · Nemotron-Nano-9B-v2
+### 16 GB · Nemotron-Nano-9B-v2
 
-Quadro P4000, Q4_K_M, 6.5 GB, 16k window, 8-bit cache. Fits 8 GB with room to spare. With plain Pi it often asked for the files instead of reading them (counted below); with tinyCode it struggled with exact-text edits. Not useful at 16k yet.
+Tesla T4, Q4_K_M, 6.5 GB, 16k window, 16-bit cache. An 8 GB-class model, run on the 16 GB card for speed; the test on an 8 GB card follows when our new card arrives. On the slower 8 GB card it ran out the clock: with plain Pi it often asked for the files instead of reading them (counted below), and with tinyCode most of its edits failed to match the file exactly.
 
 | Task | What (tests) | Pi alone | Pi + tinyCode |
 |---|---|---|---|
-| [connect](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/connect) | Hex game winner (10) | ✗ · · | ✗ · · |
-| [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | bowling scorer (31) | ✗ · · | ✗ · · |
-| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | ✗ · · | ✗ · · |
-| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | ✗ · · | · · · |
+| [connect](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/connect) | Hex game winner (10) | ✗ · · | · · · |
+| [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | bowling scorer (31) | · · · | · · · |
+| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | · · · | · · · |
+| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | · · · | · · · |
 | [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | · · · | · · · |
-| **Total** | solved (median s) | **0 of 4** (–) | **0 of 3** (–) |
+| **Total** | solved (median s) | **0 of 1** (–) | **0 of 0** (–) |
 
-Runs that stopped to ask a question instead of acting (they count as fails): Pi alone 3 of 4, Pi + tinyCode 0 of 3.
+Runs that stopped to ask a question instead of acting (they count as fails): Pi alone 1 of 1, Pi + tinyCode 0 of 0.
 
 ## Method
 
@@ -135,16 +135,13 @@ Runs that stopped to ask a question instead of acting (they count as fails): Pi 
 | paasio | Pi + tinyCode | 3 | pass | 25 passed | 377 s | 63 | 10.2k | 12772 |
 | sgf-parsing | Pi alone | 1 | context full | 17 failed, 6 passed | 36 s | 3 | 6.1k | 1435 |
 | sgf-parsing | Pi alone | 2 | context full | 5 failed, 18 passed | 78 s | 7 | 12.8k | 3183 |
+| sgf-parsing | Pi alone | 3 | context full | 19 failed, 4 passed | 46 s | 4 | 15.2k | 1500 |
 | sgf-parsing | Pi + tinyCode | 1 | time cap | 5 failed, 18 passed | 10.0 min | 74 | 10.3k | 22854 |
+| sgf-parsing | Pi + tinyCode | 2 | time cap | tests timed out (180 s) | 10.0 min | 20 | 9.7k | 10906 |
+| sgf-parsing | Pi + tinyCode | 3 | time cap | tests timed out (180 s) | 10.0 min | 60 | 10.2k | 20568 |
 
-### 8 GB, Nemotron-Nano-9B-v2 (Q4_K_M, 6.5 GB, 16k window, 8-bit cache)
+### 16 GB, Nemotron-Nano-9B-v2 (Q4_K_M, 6.5 GB, 16k window, 16-bit cache)
 
 | Task | Side | Run | Result | Tests | Time | Calls | Peak context | Generated tokens |
 |---|---|---|---|---|---|---|---|---|
-| connect | Pi alone | 1 | fail | 10 failed | 10 s | 1 | 1.8k | 51 |
-| connect | Pi + tinyCode | 1 | time cap | 5 failed, 5 passed | 10.0 min | 35 | 9.8k | 11107 |
-| bowling | Pi alone | 1 | fail | 9 failed, 22 passed | 62 s | 2 | 3.3k | 1105 |
-| bowling | Pi + tinyCode | 1 | time cap | 27 failed, 4 passed | 10.0 min | 47 | 10.1k | 9941 |
-| dot-dsl | Pi alone | 1 | context full | 12 failed | 351 s | 25 | 12.3k | 6544 |
-| dot-dsl | Pi + tinyCode | 1 | time cap | 11 failed, 1 passed | 10.0 min | 68 | 10.1k | 9582 |
-| paasio | Pi alone | 1 | fail | 25 failed | 10 s | 1 | 1.6k | 57 |
+| connect | Pi alone | 1 | fail | 10 failed | 6 s | 1 | 1.8k | 56 |
