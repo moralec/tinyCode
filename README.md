@@ -44,7 +44,7 @@ model that fits it, a **16k context window**, three unattended runs per task and
 | 16 GB (Tesla T4) | Qwen3.6-35B-A3B (popular reference) | 4 of 14 | **10 of 13** |
 | 8 GB (Quadro P4000) | Nemotron-Nano-9B-v2 (best coder that fits) | 0 of 3 | **0 of 2** |
 
-In the tables below each mark is one run, in order: ✓ pass (small number: seconds), ✗ fail, · not run yet.
+In the tables below each mark is one run, in order: ✓ pass with its time in seconds, ✗ fail, · not run yet.
 
 ### 16 GB · gpt-oss-20b
 
@@ -52,11 +52,11 @@ Tesla T4, MXFP4, 12.1 GB, 16k window, 16-bit cache. Fast: about 50 tokens/s on t
 
 | Task | What (tests) | Pi alone | Pi + tinyCode |
 |---|---|---|---|
-| [connect](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/connect) | Hex game winner (10) | ✗ ✗ ✓<sub>26</sub> | ✓<sub>72</sub> ✓<sub>30</sub> ✓<sub>28</sub> |
+| [connect](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/connect) | Hex game winner (10) | ✗ ✗ ✓26 | ✓72 ✓30 ✓28 |
 | [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | bowling scorer (31) | ✗ ✗ ✗ | ✗ ✗ ✗ |
-| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | ✓<sub>64</sub> ✓<sub>52</sub> ✗ | ✓<sub>44</sub> ✓<sub>50</sub> ✓<sub>60</sub> |
-| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | ✗ ✗ ✗ | ✗ ✓<sub>152</sub> ✗ |
-| [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | ✗ ✗ · | ✓<sub>154</sub> · · |
+| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | ✓64 ✓52 ✗ | ✓44 ✓50 ✓60 |
+| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | ✗ ✗ ✗ | ✗ ✓152 ✗ |
+| [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | ✗ ✗ · | ✓154 · · |
 | **Total** | solved (median s) | **3 of 14** (52 s) | **8 of 13** (55 s) |
 
 ### 16 GB · Qwen3.6-35B-A3B
@@ -65,10 +65,10 @@ Tesla T4, UD-IQ3_XXS, 13.2 GB, 16k window, 16-bit cache. Talkative: on connect, 
 
 | Task | What (tests) | Pi alone | Pi + tinyCode |
 |---|---|---|---|
-| [connect](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/connect) | Hex game winner (10) | ✗ ✗ ✗ | ✓<sub>30</sub> ✓<sub>76</sub> ✓<sub>260</sub> |
-| [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | bowling scorer (31) | ✗ ✗ ✗ | ✗ ✗ ✓<sub>327</sub> |
-| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | ✓<sub>76</sub> ✗ ✗ | ✓<sub>198</sub> ✓<sub>36</sub> ✓<sub>70</sub> |
-| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | ✓<sub>46</sub> ✓<sub>64</sub> ✓<sub>48</sub> | ✓<sub>204</sub> ✓<sub>298</sub> ✓<sub>377</sub> |
+| [connect](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/connect) | Hex game winner (10) | ✗ ✗ ✗ | ✓30 ✓76 ✓260 |
+| [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | bowling scorer (31) | ✗ ✗ ✗ | ✗ ✗ ✓327 |
+| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | ✓76 ✗ ✗ | ✓198 ✓36 ✓70 |
+| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | ✓46 ✓64 ✓48 | ✓204 ✓298 ✓377 |
 | [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | ✗ ✗ · | ✗ · · |
 | **Total** | solved (median s) | **4 of 14** (56 s) | **10 of 13** (201 s) |
 
