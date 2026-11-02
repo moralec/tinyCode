@@ -124,8 +124,10 @@ export interface Config {
     autoContinue: number;
     /** the system prompt tells the model to write a file and run it when a debug script would pass this many lines */
     scriptLines: number;
-    /** a project context file (AGENTS.md / CLAUDE.md in Pi's system prompt) over this many tokens is replaced by its digest, an outline until the digest is made (src/context/digest.ts); 0 = off */
+    /** a project context file (AGENTS.md / CLAUDE.md in Pi's system prompt) over max(this, contextFileShare x the model's window) tokens is replaced by a digest of that size, an outline until the digest is made (src/context/digest.ts); 0 = off */
     contextFileTokens: number;
+    /** share of the model's context window a context file may take before it is digested (the floor is contextFileTokens): 0.05 = 1.6k at 32k, 6.5k at 131k */
+    contextFileShare: number;
     maxTokens: Record<string, number>;
   };
   /** "auto" (default): tinyCode asks no diagnostic questions; "dev": shows stuck confirm, router hint, events, per-call tokens (/dev on|off) */
@@ -279,6 +281,8 @@ export const DEFAULTS: Config = {
     scriptLines: 20,
     // operator 2026-11-02: a 78 KB CLAUDE.md filled ~20k of a 32k window; ~1.5k tokens keeps the rules, not the history
     contextFileTokens: 1500,
+    // operator 2026-11-02: the budget grows with the window (131k gpt-oss): digest still, but keep more of the file
+    contextFileShare: 0.05,
     maxTokens: { pick: 300, edit: 4096, review: 600, branch: 180, hunk: 600, route: 200, plan: 2500, research: 200, explain: 400, doc: 1500, ask: 600, commit: 300 },
   },
   mode: "auto",
@@ -348,6 +352,7 @@ export function validate(cfg: Config): Config {
   if (!(Number.isInteger(cfg.limits.undoWorseFrom) && cfg.limits.undoWorseFrom >= 1)) throw new ConfigError("limits.undoWorseFrom: must be an integer >= 1 (1 = at once)");
   for (const k of ["maskAboveTokens", "scriptLines", "freshFileLines"] as const)
     if (!(Number.isInteger(cfg.limits[k]) && cfg.limits[k] > 0)) throw new ConfigError(`limits.${k}: must be a positive integer`);
+  if (!(typeof cfg.limits.contextFileShare === "number" && cfg.limits.contextFileShare >= 0 && cfg.limits.contextFileShare < 1)) throw new ConfigError("limits.contextFileShare: must be a share of the context window in [0, 1)");
   for (const k of ["stuckTestRuns", "autoContinue", "contextFileTokens"] as const)
     if (!(Number.isInteger(cfg.limits[k]) && cfg.limits[k] >= 0)) throw new ConfigError(`limits.${k}: must be an integer >= 0 (0 = off)`);
   for (const [name, lane] of Object.entries(cfg.lanes)) {

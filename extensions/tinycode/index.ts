@@ -14,7 +14,7 @@ import { agreement, asToolTurn, choose, DoneGuard, dropDisplayOnly, formatOrches
 import { confirmFor, explicitlyAsked, isDev, modeState, parseDevArgs, setMode } from "../../src/mode.ts";
 import { CUSTOM_SAY, entersRawWork, forTool, intercepts, isWorkflowTool, registerWorkflowTools, ToolDiet, toolSet, ToolsFirst, triage, type ToolOutcome, type ToolRunner, type WorkflowTool } from "../../src/tools.ts";
 import { composePrompt } from "../../src/prompt.ts";
-import { digestDir, makeSummarize, shrinkContextFiles } from "../../src/context/digest.ts";
+import { contextFileLimit, digestDir, makeSummarize, shrinkContextFiles } from "../../src/context/digest.ts";
 import { BestTree, LOOP_SLOT, rewriteNudge } from "../../src/besttree.ts";
 import { endProgress, live, startProgress, uiSink } from "../../src/progress-ui.ts";
 import { createProgress, type Progress, type Summary } from "../../src/progress.ts";
@@ -302,7 +302,8 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
   );
   pi.on("before_agent_start", async (e, ctx) => {
     const ctxFiles = shrinkContextFiles(e.systemPrompt, {
-      maxTokens: cfg.limits.contextFileTokens, charsPerToken: cfg.ladder.charsPerToken, dir: digestDir(),
+      maxTokens: contextFileLimit(cfg.limits.contextFileTokens, cfg.limits.contextFileShare, ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW),
+      charsPerToken: cfg.ladder.charsPerToken, dir: digestDir(),
       summarize: digestLane ? summarizeContext : undefined, pending: digestPending,
       onDigest: (path, ok, detail) => { if (ctx.hasUI) ctx.ui.notify(ok ? `tinyCode: ${path} digest ready, ${detail}` : `tinyCode: ${path} digest failed (${detail}); outline stays`, ok ? "info" : "warning"); },
     });

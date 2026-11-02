@@ -45,8 +45,14 @@ export function digestDir(env: Record<string, string | undefined> = process.env)
   return env.TINYCODE_CONTEXT_CACHE || join(homedir(), ".local", "state", "tinycode", "context");
 }
 
-export function digestKey(content: string): string {
-  return createHash("sha256").update(`v${DIGEST_VERSION}\n${content}`).digest("hex").slice(0, 24);
+/** one digest per file version and size budget (a 32k window's digest is not the one a 131k window gets) */
+export function digestKey(content: string, maxChars: number): string {
+  return createHash("sha256").update(`v${DIGEST_VERSION}\n${maxChars}\n${content}`).digest("hex").slice(0, 24);
+}
+
+/** the token limit for a context file: max(floor, share x window); floor 0 = off (operator 2026-11-02) */
+export function contextFileLimit(floor: number, share: number, window: number): number {
+  return floor > 0 ? Math.max(floor, Math.round(share * window)) : 0;
 }
 
 /**
@@ -103,7 +109,7 @@ export function shrinkContextFiles(prompt: string, o: ShrinkOptions): { prompt: 
   const maxChars = Math.floor(o.maxTokens * o.charsPerToken);
   const next = prompt.replace(BLOCK, (whole, path: string, content: string) => {
     if (content.length <= maxChars) return whole;
-    const key = digestKey(content);
+    const key = digestKey(content, maxChars);
     const kept = readDigest(o.dir, key);
     let body: string;
     let kind: Shrunk["kind"];

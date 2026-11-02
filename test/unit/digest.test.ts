@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readdirSync } from "node:fs";
 import { test } from "node:test";
-import { digestKey, makeSummarize, outline, sections, shrinkContextFiles, type Summarize } from "../../src/context/digest.ts";
+import { contextFileLimit, digestKey, makeSummarize, outline, sections, shrinkContextFiles, type Summarize } from "../../src/context/digest.ts";
 import type { Message } from "../../src/llm.ts";
 import { tmpDir } from "./tmpdir.ts";
 
@@ -67,7 +67,8 @@ test("a big file: outline at once, one background digest (even across two reques
 
 test("a changed file gets a new digest; a failed or useless digest leaves the outline and writes nothing", async () => {
   const dir = tmpDir("digest-");
-  assert.notEqual(digestKey(BIG), digestKey(`${BIG}x`));
+  assert.notEqual(digestKey(BIG, 520), digestKey(`${BIG}x`, 520));
+  assert.notEqual(digestKey(BIG, 520), digestKey(BIG, 4000), "a bigger window gets its own, bigger digest");
   const done: Array<[boolean, string]> = [];
   const onDigest = (_p: string, ok: boolean, d: string) => done.push([ok, d]);
   shrinkContextFiles(prompt(BIG), { maxTokens: 200, charsPerToken: 2.6, dir, onDigest, summarize: async () => { throw new Error("400 model not served"); } });
@@ -77,6 +78,13 @@ test("a changed file gets a new digest; a failed or useless digest leaves the ou
   assert.ok(done[0][1].includes("400 model not served"));
   assert.ok(!existsSync(dir) || readdirSync(dir).length === 0, "no digest file");
   assert.equal(shrinkContextFiles(prompt(BIG), { maxTokens: 200, charsPerToken: 2.6, dir }).shrunk[0].kind, "outline");
+});
+
+test("the limit is a share of the window with a floor; floor 0 turns it off", () => {
+  assert.equal(contextFileLimit(1500, 0.05, 16384), 1500);
+  assert.equal(contextFileLimit(1500, 0.05, 32768), 1638);
+  assert.equal(contextFileLimit(1500, 0.05, 131072), 6554);
+  assert.equal(contextFileLimit(0, 0.05, 131072), 0);
 });
 
 test("sections split at headings within the size; makeSummarize calls in order, then one reduce when still long", async () => {
