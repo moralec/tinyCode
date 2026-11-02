@@ -201,6 +201,18 @@ test("restore removes files the ladder created and the directory it made", () =>
   assert.match(readFileSync(join(cwd, "pager.py"), "utf8"), /def paginate/);
 });
 
+test("restore never removes a file too big to snapshot (it existed before)", () => {
+  const f = fixture("t01-rung1");
+  const { cwd, env } = setup(f);
+  const big = '{"x": "' + "a".repeat(2_100_000) + '"}\n';
+  writeFileSync(join(cwd, "data.json"), big);
+  takeSnapshot(cwd, env);
+  writeFileSync(join(cwd, "pager.py"), "changed\n");
+  const r = restoreSnapshot(cwd, env);
+  assert.deepEqual(r, { restored: ["pager.py"], removed: [] });
+  assert.equal(readFileSync(join(cwd, "data.json"), "utf8"), big);
+});
+
 // ---- no failing test: reproduce the described bug first (as /test does), then the ladder
 const tblock = (path: string, search: string, replace: string) => `${path}\n<<<<<<< SEARCH\n${search}\n=======\n${replace}\n>>>>>>> REPLACE\n`;
 function slugRepo() {

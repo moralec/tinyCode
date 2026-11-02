@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { tmpDir } from "./tmpdir.ts";
 import { deepMerge, DEFAULTS, mergeConfig, type Config } from "../../src/config.ts";
 import type { ChatOptions, ChatResult, Message } from "../../src/llm.ts";
-import { CODE_ONLY_RULE, SYSTEM } from "../../src/protocol/prompts.ts";
+import { CODE_ONLY_RULE, PATH_RULE, SYSTEM } from "../../src/protocol/prompts.ts";
 import { parseFixArgs, runFix, secondTryFit, secondTryText, type PiHandoff } from "../../src/workflows/fix.ts";
 import { cutMiddle, estTokens, failingTestsCode, failingTestsOnly, fitHead, headText, type FitOpts, type QuickHead } from "../../src/workflows/quickfit.ts";
 
@@ -322,10 +322,11 @@ async function bowling(window: number) {
 test("replay bowling 8k: the recorded 7.1k-token rung-1 prompt is rebuilt exactly at 32k, and at 8k it fits with the reply reserve", async () => {
   const chars = (ms: Message[]) => ms.reduce((n, m) => n + m.content.length, 0);
   const wide = await bowling(32768);
-  // recorded before the code-only rule (operator 2026-10-30): the system text is the one difference
-  const recorded = BOWL.messages.map((m) => (m.role === "system" ? { ...m, content: m.content.replace("No explanations.", `No explanations. ${CODE_ONLY_RULE}`) } : m));
+  // recorded before the code-only rule and the concrete path example (operator 2026-10-30): the system text is the one difference
+  const system = (t: string) => t.replace("No explanations.", `No explanations. ${CODE_ONLY_RULE}`).replace("path/to/file.py\n", "shop/cart.py\n").replace("REPLACE\n\nSEARCH matches", `REPLACE\n\n${PATH_RULE} SEARCH matches`);
+  const recorded = BOWL.messages.map((m) => (m.role === "system" ? { ...m, content: system(m.content) } : m));
   assert.deepEqual(wide.call.messages, recorded, "same prompt as recorded when the window is wide");
-  assert.equal(chars(wide.call.messages), BOWL.recorded.prompt_chars + CODE_ONLY_RULE.length + 1);
+  assert.equal(chars(wide.call.messages), BOWL.recorded.prompt_chars + CODE_ONLY_RULE.length + 1 + PATH_RULE.length + 1 + "shop/cart.py".length - "path/to/file.py".length);
   // the recorded prompt read at 2.62 chars per token: 18582 chars, 7082 tokens; 1110 reply tokens fit, finish length
   const ratio = BOWL.recorded.prompt_chars / BOWL.recorded.prompt_tokens;
   assert.ok(BOWL.recorded.prompt_tokens + 2048 > BOWL.recorded.window, "the old prompt left less than the reserve");

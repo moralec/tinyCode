@@ -197,7 +197,7 @@ export async function runEdit(args: EditArgs, deps: EditDeps): Promise<EditResul
       const target = join(scratch, shown);
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, text);
-      const res = await applyReply(r.text, { cwd: scratch, protected: [], maxWholeFileLines: 400 });
+      const res = await applyReply(r.text, { cwd: scratch, protected: [], maxWholeFileLines: 400, env: deps.env });
       const hit = res.applied.includes(shown);
       const extra = res.applied.filter((p) => p !== shown);
       let problem: string | null = null;

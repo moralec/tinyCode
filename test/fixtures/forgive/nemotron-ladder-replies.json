@@ -1,0 +1,70 @@
+{
+ "source": "Nemotron-Nano-9B-v2, 16k, the fix ladder's rung-1 replies (fix-replies.jsonl, runs-radar 2026-10-30), with the exercise stub each was written against. Exercise code: Exercism python track, MIT.",
+ "stubs": {
+  "connect": {
+   "solution": "connect.py",
+   "test": "connect_test.py",
+   "text": "\nclass ConnectGame:\n    def __init__(self, board):\n        pass\n\n    def get_winner(self):\n        pass\n"
+  },
+  "bowling": {
+   "solution": "bowling.py",
+   "test": "bowling_test.py",
+   "text": "class BowlingGame:\n    def __init__(self):\n        pass\n\n    def roll(self, pins):\n        pass\n\n    def score(self):\n        pass\n"
+  },
+  "dot-dsl": {
+   "solution": "dot_dsl.py",
+   "test": "dot_dsl_test.py",
+   "text": "NODE, EDGE, ATTR = range(3)\n\n\nclass Node:\n    def __init__(self, name, attrs):\n        self.name = name\n        self.attrs = attrs\n\n    def __eq__(self, other):\n        return self.name == other.name and self.attrs == other.attrs\n\n\nclass Edge:\n    def __init__(self, src, dst, attrs):\n        self.src = src\n        self.dst = dst\n        self.attrs = attrs\n\n    def __eq__(self, other):\n        return (self.src == other.src and\n                self.dst == other.dst and\n                self.attrs == other.attrs)\n\n\nclass Graph:\n    def __init__(self, data=None):\n        pass\n"
+  }
+ },
+ "replies": [
+  {
+   "run": "135334-nemo-connect-r1",
+   "task": "connect",
+   "n": 1,
+   "reply": "path/to/connect.py\n<<<<<<< SEARCH\nclass ConnectGame:\n    def __init__(self, board):\n        pass\n\n    def get_winner(self):\n        pass\n=======\nclass ConnectGame:\n    def __init__(self, board):\n        self.board = board.splitlines()\n        self.rows = len(self.board)\n        self.cols = max(len(row) for row in self.board) if self.rows > 0 else 0\n\n    def get_winner(self):\n        # Check for horizontal wins\n        for row in self.board:\n            if 'X' * 3 in row or 'O' * 3 in row:\n                return 'X' if 'X' * 3 in row else 'O'\n        \n        # Check for vertical wins\n        for col in range(self.cols):\n            col_chars = [row[col] if col < len(row) else '.' for row in self.board]\n            if 'X' * 3 in ''.join(col_chars) or 'O' * 3 in ''.join(col_chars):\n                return 'X' if 'X' * 3 in ''.join(col_chars) else 'O'\n        \n        # Check for diagonal wins (top-left to bottom-right)\n        for i in range(self.rows):\n            for j in range(self.cols):\n                if i + 2 < self.rows and j + 2 < self.cols:\n                    diag = [self.board[i+k][j+k] for k in range(3) if j+k < len(self.board[i+k])]\n                    if len(diag) == 3 and ('X' * 3 in ''.join(diag) or 'O' * 3 in ''.join(diag)):\n                        return 'X' if 'X' * 3 in ''.join(diag) else 'O'\n        \n        # Check for diagonal wins (top-right to bottom-left)\n        for i in range(self.rows):\n            for j in range(self.cols):\n                if i + 2 < self.rows and j - 2 >= 0:\n                    diag = [self.board[i+k][j-k] for k in range(3) if j-k >= 0 and j-k < len(self.board[i+k])]\n                    if len(diag) == 3 and ('X' * 3 in ''.join(diag) or 'O' * 3 in ''.join(diag)):\n                        return 'X' if 'X' * 3 in ''.join(diag) else 'O'\n        \n        return \"\"\n>>>>>>> REPLACE\n"
+  },
+  {
+   "run": "135334-nemo-connect-r1",
+   "task": "connect",
+   "n": 2,
+   "reply": "path/to/connect.py\n<<<<<<< SEARCH\nclass ConnectGame:\n    def __init__(self, board):\n        pass\n\n    def get_winner(self):\n        pass\n=======\nclass ConnectGame:\n    def __init__(self, board):\n        self.board = board.splitlines()\n        self.rows = len(self.board)\n        self.cols = max(len(row) for row in self.board) if self.rows > 0 else 0\n\n    def get_winner(self):\n        # Check for O's vertical win (top to bottom)\n        for col in range(self.cols):\n            for row in range(self.rows - 4):\n                if all(self.board[row + i][col] == 'O' for i in range(5)):\n                    return 'O'\n        \n        # Check for X's horizontal win (left to right)\n        for row in range(self.rows):\n            for col in range(self.cols - 4):\n                if all(self.board[row][col + i] == 'X' for i in range(5)):\n                    return 'X'\n        \n        # Check diagonal wins (O from top-left to bottom-right)\n        for row in range(self.rows - 4):\n            for col in range(self.cols - 4):\n                if all(self.board[row + i][col + i] == 'O' for i in range(5)):\n                    return 'O'\n        \n        # Check diagonal wins (X from top-right to bottom-left)\n        for row in range(self.rows - 4):\n            for col in range(4, self.cols):\n                if all(self.board[row + i][col - i] == 'X' for i in range(5)):\n                    return 'X'\n        \n        return ''\n>>>>>>> REPLACE\n"
+  },
+  {
+   "run": "140422-nemo-connect-r1",
+   "task": "connect",
+   "n": 1,
+   "reply": "path/to/connect.py\n<<<<<<< SEARCH\nclass ConnectGame:\n    def __init__(self, board):\n        pass\n\n    def get_winner(self):\n        pass\n=======\nclass ConnectGame:\n    def __init__(self, board):\n        self.board = board.splitlines()\n        self.rows = len(self.board)\n        self.cols = max(len(row) for row in self.board) if self.rows > 0 else 0\n\n    def get_winner(self):\n        # Check for horizontal wins\n        for row in self.board:\n            if 'X' * 3 in row or 'O' * 3 in row:\n                return 'X' if 'X' * 3 in row else 'O'\n        \n        # Check for vertical wins\n        for col in range(self.cols):\n            col_chars = [row[col] if col < len(row) else '.' for row in self.board]\n            if 'X' * 3 in ''.join(col_chars) or 'O' * 3 in ''.join(col_chars):\n                return 'X' if 'X' * 3 in ''.join(col_chars) else 'O'\n        \n        # Check for diagonal wins (top-left to bottom-right)\n        for i in range(self.rows):\n            for j in range(self.cols):\n                if i + 2 < self.rows and j + 2 < self.cols:\n                    diag = [self.board[i+k][j+k] for k in range(3) if j+k < len(self.board[i+k])]\n                    if len(diag) == 3 and ('X' * 3 in ''.join(diag) or 'O' * 3 in ''.join(diag)):\n                        return 'X' if 'X' * 3 in ''.join(diag) else 'O'\n        \n        # Check for diagonal wins (top-right to bottom-left)\n        for i in range(self.rows):\n            for j in range(self.cols):\n                if i + 2 < self.rows and j - 2 >= 0:\n                    diag = [self.board[i+k][j-k] for k in range(3) if j-k >= 0 and j-k < len(self.board[i+k])]\n                    if len(diag) == 3 and ('X' * 3 in ''.join(diag) or 'O' * 3 in ''.join(diag)):\n                        return 'X' if 'X' * 3 in ''.join(diag) else 'O'\n        \n        return \"\"\n>>>>>>> REPLACE\n"
+  },
+  {
+   "run": "140422-nemo-connect-r1",
+   "task": "connect",
+   "n": 2,
+   "reply": "path/to/connect.py\n<<<<<<< SEARCH\nclass ConnectGame:\n    def __init__(self, board):\n        pass\n\n    def get_winner(self):\n        pass\n=======\nclass ConnectGame:\n    def __init__(self, board):\n        self.board = board.splitlines()\n        self.rows = len(self.board)\n        self.cols = max(len(row) for row in self.board) if self.rows > 0 else 0\n\n    def get_winner(self):\n        # Check for vertical win (O from top to bottom)\n        for col in range(self.cols):\n            for row in range(self.rows):\n                if self.board[row][col] == 'O':\n                    if all(self.board[row + i][col] == 'O' for i in range(1, 6)):\n                        return 'O'\n        \n        # Check for horizontal win (X from left to right)\n        for row in range(self.rows):\n            for col in range(self.cols):\n                if self.board[row][col] == 'X':\n                    if all(col + i < self.cols and self.board[row][col + i] == 'X' for i in range(1, 6)):\n                        return 'X'\n        \n        return ''\n>>>>>>> REPLACE\n"
+  },
+  {
+   "run": "141442-nemo-bowling-r1",
+   "task": "bowling",
+   "n": 1,
+   "reply": "path/to/bowling.py\n<<<<<<< SEARCH\n    def __init__(self):\n        self.frames = []\n        self.current_frame = 0\n        self.rolls = []\n=======\n    def __init__(self):\n        self.frames = []\n        self.current_frame = 0\n        self.rolls = []\n        self.bonus_rolls = 0\n>>>>>>> REPLACE\n"
+  },
+  {
+   "run": "141442-nemo-bowling-r1",
+   "task": "bowling",
+   "n": 2,
+   "reply": "path/to/bowling.py\n<<<<<<< SEARCH\ndef __init__(self):\n=======\n    self.rolls = []\n    self.current_frame = 0\n    self.in_last_frame = False\n>>>>>>> REPLACE\n\npath/to/bowling.py\n<<<<<<< SEARCH\ndef roll(self, pins):\n=======\n    if pins < 0 or pins > 10:\n        raise ValueError(\"A roll cannot score negative points or more than 10 points\")\n    self.rolls.append(pins)\n    if pins == 10:  # Strike\n        self.current_frame += 1\n        if self.current_frame < 10:\n            self.in_last_frame = False\n        else:\n            self.in_last_frame = True\n    elif self.rolls[-2] + pins == 10:  # Spare\n        self.current_frame += 1\n        self.in_last_frame = False if self.current_frame < 10 else True\n    else:  # Open frame\n        if len(self.rolls) >= 20:\n            raise ValueError(\"Cannot roll if game already has 10 frames\")\n        if self.current_frame < 9:\n            self.current_frame += 1\n        else:\n            self.in_last_frame = True\n\n    if self.current_frame > 10:\n        raise ValueError(\"Game cannot have more than 10 frames\")\n\ndef score(self):\n    if len(self.rolls) < 12:\n        raise ValueError(\"An incomplete game cannot be scored\")\n    score = 0\n    frame = 0\n    while frame < 10:\n        if self.rolls[frame*2] == 10:  # Strike\n            bonus = self.rolls[frame*2+1] + self.rolls[frame*2+2] if frame < 9 else (self.rolls[frame*2+1] + (self.rolls[frame*2+2] if len(self.rolls) > frame*2+2 else 0))\n            score += 10 + bonus\n            frame += 1\n        elif self.rolls[frame*2] + self.rolls[frame*2+1] == 10:  # Spare\n            bonus = self.rolls[frame*2+2] if frame < 9 else self.rolls[frame*2+2]\n            score += 10 + bonus\n            frame += 1\n        else:  # Open frame\n            score += self.rolls[frame*2] + self.rolls[frame*2+1]\n            frame += 1\n    return score\n>>>>>>> REPLACE\n"
+  },
+  {
+   "run": "142556-nemo-dot-dsl-r1",
+   "task": "dot-dsl",
+   "n": 1,
+   "reply": "path/to/dot_dsl.py\n<<<<<<< SEARCH\n    def __init__(self, data=None):\n        pass\n=======\n    def __init__(self, data=None):\n        if data is None:\n            self.nodes = []\n            self.edges = []\n            self.attrs = {}\n        else:\n            self.nodes = []\n            self.edges = []\n            self.attrs = {}\n            for item in data:\n                if len(item) == 1:\n                    key = item[0]\n                    if key == ATTR:\n                        if len(item) != 3:\n                            raise ValueError(\"Attribute is malformed\")\n                        self.attrs[item[1]] = item[2]\n                    else:\n                        raise TypeError(\"Graph data malformed\")\n                elif len(item) == 3:\n                    key, name, attrs = item\n                    if key == NODE:\n                        self.nodes.append(Node(name, attrs))\n                    elif key == EDGE:\n                        if len(attrs) != 0:\n                            raise ValueError(\"Edge is malformed\")\n                        self.edges.append(Edge(name, name, {}))  # Placeholder for src/dst\n                    else:\n                        raise TypeError(\"Graph data malformed\")\n                else:\n                    raise TypeError(\"Graph data malformed\")\n>>>>>>> REPLACE\n"
+  },
+  {
+   "run": "142556-nemo-dot-dsl-r1",
+   "task": "dot-dsl",
+   "n": 2,
+   "reply": "path/to/dot_dsl.py\n<<<<<<< SEARCH\n    def __init__(self, data=None):\n        pass\n=======\n    def __init__(self, data=None):\n        self.nodes = []\n        self.edges = []\n        self.attrs = {}\n        if data is None:\n            return\n        for item in data:\n            if len(item) == 1:\n                key = item[0]\n                if key == ATTR:\n                    self.attrs[item[1]] = item[2]\n                else:\n                    raise TypeError(\"Graph data malformed\")\n            elif len(item) == 3:\n                key, name, attrs = item\n                if key == NODE:\n                    self.nodes.append(Node(name, attrs))\n                elif key == EDGE:\n                    if len(attrs) != 0:\n                        raise ValueError(\"Edge is malformed\")\n                    self.edges.append(Edge(name, item[1], {}))\n                else:\n                    raise ValueError(\"Unknown item\")\n            else:\n                raise TypeError(\"Graph item incomplete\")\n=======\n"
+  }
+ ]
+}

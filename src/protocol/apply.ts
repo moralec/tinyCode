@@ -4,15 +4,26 @@
 //  - a file's CRLF line endings are matched as LF and written back as CRLF (tc0 rewrote the file as LF)
 //  - a block whose SEARCH equals its REPLACE is not applied ("no change"); tc0 counted it as applied
 //  - every failure carries a reason, and writes to one path go through a queue
+//  - a block path that does not exist is resolved (resolveBlockPath): a leading `path/to/` placeholder dropped, then the
+//    one non-test file with that name; logged as "path X -> Y"
+import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, posix, relative, resolve, win32 } from "node:path";
+import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from "node:path";
+import { repoFiles } from "../context/outline.ts";
+import { logCall } from "../log.ts";
 import { normalizeEol, parseBlocks, parseWholeFiles } from "./blocks.ts";
+
+const TEST_FILE = /(^|\/)(tests?|__tests__)\/|(^|\/)test_[^/]*$|[._](test|spec)\.[a-z]+$|_test\.[a-z]+$|(^|\/)conftest\.py$/i;
+/** A test file by its path (tests/ dirs, test_*.py, *_test.*, *.test.*, *.spec.*, conftest.py). */
+export const isTestPath = (rel: string): boolean => TEST_FILE.test(rel);
 
 export const NO_CHANGE = "no change: SEARCH and REPLACE are identical";
 export type FailReason = "not found" | "protected" | "bad path" | "too long" | typeof NO_CHANGE;
 
 export interface BlockResult {
   path: string;
+  /** the path as the reply wrote it, when it was resolved to `path` (resolveBlockPath) */
+  from?: string;
   kind: "search" | "create" | "file";
   ok: boolean;
   reason?: FailReason;
@@ -36,6 +47,41 @@ export interface ApplyOptions {
   protected?: readonly string[] | null;
   /** whole-file fallback: largest existing file (in lines) a fenced reply may replace. Default 150. */
   maxWholeFileLines?: number;
+  /** where a resolved path is logged (src/log.ts; default process.env) */
+  env?: Record<string, string | undefined>;
+}
+
+const PLACEHOLDER = /^(?:\.\/)?path\/to\//i;
+
+/**
+ * A block's path that does not exist in cwd: (a) a leading `path/to/` placeholder dropped (Nemotron-Nano-9B-v2, runs-radar
+ * 2026-10-30: all 8 ladder replies were addressed to `path/to/<file>`, copied from the prompt's example); (b) still
+ * missing and an edit of an existing file (`existing`): the one non-test file of the tree with that name. 0 or 2+ such
+ * files: the path as written. `files` = the tree's files, "/"-separated (default repoFiles).
+ */
+export function resolveBlockPath(cwd: string, path: string, existing: boolean, files?: string[]): string {
+  const there = (p: string) => {
+    const abs = safeResolve(cwd, p);
+    try {
+      return abs !== null && existsSync(abs) && statSync(abs).isFile();
+    } catch {
+      return false;
+    }
+  };
+  if (there(path)) return path;
+  const stripped = path.replace(PLACEHOLDER, "");
+  if (stripped !== path && stripped && (there(stripped) || !existing)) return stripped;
+  if (!existing) return path;
+  const name = basename(stripped);
+  const same = (files ?? repoFiles(cwd)).filter((f) => basename(f) === name && !isTestPath(f));
+  return same.length === 1 ? same[0]! : path;
+}
+
+function resolved(opts: ApplyOptions, path: string, existing: boolean): string {
+  const to = resolveBlockPath(opts.cwd, path, existing);
+  if (to !== path)
+    logCall({ ts: new Date().toISOString(), session: "", workflow: null, step: "path_resolve", lane: "", model: "", prompt_tokens: 0, cached_tokens: 0, completion_tokens: 0, ms: 0, status: `path ${path} -> ${to}` }, opts.env ?? process.env);
+  return to;
 }
 
 /** python os.path.normpath on a "/"-separated path */
@@ -155,28 +201,32 @@ async function runBlocks(
   record: (r: BlockResult) => void,
 ): Promise<number> {
   const blocks = parseBlocks(reply);
-  for (const b of blocks) {
-    const kind = b.search.trim() ? "search" : "create";
+  for (const raw of blocks) {
+    const kind = raw.search.trim() ? "search" : "create";
+    // protection is checked on the resolved path: a placeholder never reaches a protected file
+    const path = resolved(opts, raw.path, kind === "search");
+    const b = { ...raw, path };
+    const from = path !== raw.path ? { from: raw.path } : {};
     if (isProtected(b.path, prot)) {
-      record({ path: b.path, kind, ok: false, reason: "protected" });
+      record({ path: b.path, ...from, kind, ok: false, reason: "protected" });
       continue;
     }
     const abs = safeResolve(opts.cwd, b.path);
     if (abs === null) {
-      record({ path: b.path, kind, ok: false, reason: "bad path" });
+      record({ path: b.path, ...from, kind, ok: false, reason: "bad path" });
       continue;
     }
     if (isNoopEdit(b.search, b.replace)) {
-      record({ path: b.path, kind, ok: false, reason: NO_CHANGE });
+      record({ path: b.path, ...from, kind, ok: false, reason: NO_CHANGE });
       continue;
     }
     const r = await withFileMutationQueue(abs, async (): Promise<BlockResult> => {
       const f = await load(abs);
-      if (f === "bad") return { path: b.path, kind, ok: false, reason: "bad path" };
+      if (f === "bad") return { path: b.path, ...from, kind, ok: false, reason: "bad path" };
       const next = applyEdit(f.text, b.search, b.replace);
-      if (next === null) return { path: b.path, kind, ok: false, reason: "not found" };
+      if (next === null) return { path: b.path, ...from, kind, ok: false, reason: "not found" };
       await save(abs, next, f.eol);
-      return { path: b.path, kind, ok: true };
+      return { path: b.path, ...from, kind, ok: true };
     });
     record(r);
   }
@@ -191,7 +241,9 @@ export async function applyReply(reply: string, opts: ApplyOptions): Promise<App
   const { prot, out, record } = setup(opts);
   if ((await runBlocks(reply, opts, prot, record)) > 0) return out;
   const max = opts.maxWholeFileLines ?? 150;
-  for (const f of parseWholeFiles(reply)) {
+  for (const w of parseWholeFiles(reply)) {
+    // a whole file replaces an existing one only: resolved like an edit
+    const f = { ...w, path: resolved(opts, w.path, true) };
     if (isProtected(f.path, prot)) {
       record({ path: f.path, kind: "file", ok: false, reason: "protected" });
       continue;

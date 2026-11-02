@@ -228,7 +228,7 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
     { role: "system", content: ADD_RULES },
     { role: "user", content: `${parts.join("\n\n")}\n\nTask:\n${args.task}\n${testLine}\n\nEdit blocks only.` },
   ]);
-  const applied = await applyReply(reply, { cwd, protected: [], maxWholeFileLines: 400 });
+  const applied = await applyReply(reply, { cwd, protected: [], maxWholeFileLines: 400, env });
   for (const f of applied.applied) pg.touch(f);
   const wroteTarget = applied.applied.includes(target);
   const wroteTest = applied.applied.find((p) => isTestPath(p) && p !== target) ?? null;
@@ -286,7 +286,7 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
           "Corrected edit blocks against current files (fix the test file or the code it imports).",
       },
     ]);
-    const again = await applyReply(retry, { cwd, protected: [], maxWholeFileLines: 400 });
+    const again = await applyReply(retry, { cwd, protected: [], maxWholeFileLines: 400, env });
     for (const f of again.applied) pg.touch(f);
     say(`applied: ${JSON.stringify(again.applied)}${again.failed.length ? `; not applied: ${JSON.stringify(again.failed)}` : ""}`);
     t = await tests({ cwd, test: testToRun, config: cfg.test });

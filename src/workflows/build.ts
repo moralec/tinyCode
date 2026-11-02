@@ -95,14 +95,14 @@ export function testFileFor(task: PlanTask): string {
 
 export const TEST_SYSTEM = `Write the test that defines when one task is done. Test first: the code does not exist yet. Reply ONLY edit blocks for the one test file named in the task, exactly:
 
-path/to/test_file.py
+tests/test_cart.py
 <<<<<<< SEARCH
 exact lines copied from the file
 =======
 new lines
 >>>>>>> REPLACE
 
-New file: empty SEARCH. Edit no other file. No explanations.`;
+First line: the test file's path as named in the task (tests/test_cart.py is only the example). New file: empty SEARCH. Edit no other file. No explanations.`;
 
 /** /build declares one phase per task once the plan is read (`task 3/5: title`); a task's ladder shows as a nested `fix`. */
 export const BUILD_PHASES: string[] = [];
@@ -379,7 +379,7 @@ async function runTask(
     for (let attempt = 0; attempt < 2 && !wrote; attempt++) {
       calls++;
       const r = await chat("edit", msgs, { workflow: "build", config: cfg, env });
-      const res = await applyReply(r.text, { cwd, protected: others });
+      const res = await applyReply(r.text, { cwd, protected: others, env });
       // the protected list covers files that exist; a new file other than the test is removed again
       for (const p of res.applied) if (p !== testFile) rmSync(join(cwd, p), { force: true });
       wrote = res.applied.includes(testFile);

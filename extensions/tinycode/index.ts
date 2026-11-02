@@ -14,14 +14,17 @@ import { agreement, asToolTurn, choose, DoneGuard, dropDisplayOnly, formatOrches
 import { confirmFor, explicitlyAsked, isDev, modeState, parseDevArgs, setMode } from "../../src/mode.ts";
 import { CUSTOM_SAY, entersRawWork, forTool, intercepts, isWorkflowTool, registerWorkflowTools, ToolDiet, toolSet, ToolsFirst, triage, type ToolOutcome, type ToolRunner, type WorkflowTool } from "../../src/tools.ts";
 import { composePrompt } from "../../src/prompt.ts";
+import { digestDir, makeSummarize, shrinkContextFiles } from "../../src/context/digest.ts";
 import { BestTree, LOOP_SLOT, rewriteNudge } from "../../src/besttree.ts";
 import { endProgress, live, startProgress, uiSink } from "../../src/progress-ui.ts";
 import { createProgress, type Progress, type Summary } from "../../src/progress.ts";
 import { BUILD_PHASES, parseBuildArgs, runBuild } from "../../src/workflows/build.ts";
 import { Compactor } from "../../src/compact.ts";
 import { loadPrepareCompaction, runPiCompact } from "../../src/picompact.ts";
-import { compact as piCompact } from "@earendil-works/pi-coding-agent";
+import { compact as piCompact, convertToLlm } from "@earendil-works/pi-coding-agent";
+import { alternate } from "../../src/alternate.ts";
 import { wrongPathHint } from "../../src/pathhint.ts";
+import { forgiveEditCall, type ForgiveCall } from "../../src/forgive.ts";
 import { ADD_PHASES, parseAddArgs, runAdd } from "../../src/workflows/add.ts";
 import { ASK_PHASES, parseAskArgs, runAsk } from "../../src/workflows/ask.ts";
 import { COMMIT_PHASES, parseCommitArgs, runCommit } from "../../src/workflows/commit.ts";
@@ -108,6 +111,17 @@ export default function (pi: ExtensionAPI) {
       else process.stdout.write(text + "\n");
     },
   });
+}
+
+/** Pi's failed edit, forgiven or clarified (src/forgive.ts); one log line each, like the other tinyCode events. Never a test file. */
+function forgiveEdit(cwd: string, input: Record<string, unknown>, content: readonly { type: string; text?: string }[]): ForgiveCall | null {
+  const err = content.map((p) => (p.type === "text" ? (p.text ?? "") : "")).join("");
+  const f = forgiveEditCall(cwd, input, err, isTestPath);
+  if (!f) return null;
+  const where = f.result.lines.map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(",");
+  const status = f.result.kind === "applied" ? `applied: ${f.path} lines ${where} (${f.result.tolerant} tolerant)` : `clarified: ${f.path} lines ${where}`;
+  logCall({ ts: new Date().toISOString(), session: SESSION, workflow: "pi", step: f.result.kind === "applied" ? "edit_forgive" : "edit_clarify", lane: "", model: "", prompt_tokens: 0, cached_tokens: 0, completion_tokens: 0, ms: 0, status });
+  return f;
 }
 
 /** the "tests still fail, continue" message tinyCode adds when the model stops early (it is model context) */
@@ -278,9 +292,22 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     }
     return { action: "continue" as const };
   });
+  // oversized AGENTS.md / CLAUDE.md (operator 2026-11-02): digest made once per file version on the digest step's lane,
+  // in the background; an outline stands in until it exists (src/context/digest.ts)
+  const digestPending = new Set<string>();
+  const digestLane = cfg.lanes[cfg.steps.digest.lane];
+  const summarizeContext = makeSummarize(
+    async (messages, maxTokens) => (await chat("digest", messages, { workflow: "digest", maxTokens, config: cfg })).text,
+    Math.floor((digestLane?.contextWindow ?? DEFAULT_CONTEXT_WINDOW) * 0.5 * cfg.ladder.charsPerToken),
+  );
   pi.on("before_agent_start", async (e, ctx) => {
+    const ctxFiles = shrinkContextFiles(e.systemPrompt, {
+      maxTokens: cfg.limits.contextFileTokens, charsPerToken: cfg.ladder.charsPerToken, dir: digestDir(),
+      summarize: digestLane ? summarizeContext : undefined, pending: digestPending,
+      onDigest: (path, ok, detail) => { if (ctx.hasUI) ctx.ui.notify(ok ? `tinyCode: ${path} digest ready, ${detail}` : `tinyCode: ${path} digest failed (${detail}); outline stays`, ok ? "info" : "warning"); },
+    });
     // the tools-first line names only the intercepted workflow tools (config `intercept`)
-    const systemPrompt = composePrompt(e.systemPrompt, cfg.limits.scriptLines, cfg.intercept);
+    const systemPrompt = composePrompt(ctxFiles.prompt, cfg.limits.scriptLines, cfg.intercept);
     const text = String((e as { prompt?: string }).prompt ?? "").trim();
     if (text && !insideWorkflow()) modeState.lastPrompt = text;
     // not for a workflow's own hand-off (rung 3), not for slash commands, not for an empty prompt
@@ -423,14 +450,18 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
   });
 
   pi.on("tool_result", (e, ctx) => {
-    lim.guard.result(e.toolName, e.input, e.isError);
+    // forgiving edits (src/forgive.ts): a failed Pi edit with a whitespace-only miss is applied here, a duplicate is located
+    const forgiven = cfg.limits.forgiveEdits && e.toolName === "edit" && e.isError ? forgiveEdit(ctx.cwd, e.input, e.content) : null;
+    const isError = forgiven?.result.kind === "applied" ? false : e.isError;
+    const content = forgiven ? [{ type: "text" as const, text: forgiven.result.text }] : e.content;
+    lim.guard.result(e.toolName, e.input, isError);
     if (e.toolName === "todo") sync();
-    else if (!e.isError && (e.toolName === "edit" || e.toolName === "write")) {
+    else if (!isError && (e.toolName === "edit" || e.toolName === "write")) {
       edited = true;
       editedSinceTests = true;
       shown()?.touch(String(e.input.path ?? e.input.file_path ?? ""));
     }
-    const parts = e.content.filter((p) => p.type === "text") as { type: "text"; text: string }[];
+    const parts = content.filter((p) => p.type === "text") as { type: "text"; text: string }[];
     if (e.toolName === "run_tests") {
       // a milestone (src/checkpoint.ts): the best tree has already seen this run (src/branch.ts run_tests)
       lastTestText = parts.map((p) => p.text).join("");
@@ -441,30 +472,30 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
         logCall({ ts: new Date().toISOString(), session: SESSION, workflow: "pi", step: "checkpoint_skip", lane: "", model: "", prompt_tokens: 0, cached_tokens: 0, completion_tokens: 0, ms: 0, status: `steady: same tree as the last checkpoint (${ckpt.skipped} this request)` });
       editedSinceTests = false;
     }
-    if (parts.length !== e.content.length || !parts.length) return undefined;
+    if (parts.length !== content.length || !parts.length) return forgiven ? { content, isError } : undefined;
     let text = parts.map((p) => p.text).join("");
     // a workflow tool that did not finish (no STATUS: done): the model carries on with raw tools, so the tool diet starts
     if (!insideWorkflow() && entersRawWork({ tool: e.toolName, text })) tm.enterRaw();
-    let changed = false;
     // a read that stops early says so in one explicit line (a cut file must not read as a finished one)
-    const cut = e.toolName === "read" && !e.isError ? readCutMarker(text, e.input) : null;
+    let changed = forgiven !== null;
+    const cut = e.toolName === "read" && !isError ? readCutMarker(text, e.input) : null;
     if (cut !== null) {
       text = cut;
       changed = true;
     }
     // a mistyped project path: say where the project is and which file was meant (src/pathhint.ts)
-    const hint = wrongPathHint(ctx.cwd, e.toolName, e.input, e.isError, text);
+    const hint = wrongPathHint(ctx.cwd, e.toolName, e.input, isError, text);
     if (hint) {
       text += `\n${hint}`;
       changed = true;
     }
     // a whole-file rewrite once tests pass: a nudge, never a block
-    if (rewrites.delete(e.toolCallId) && !e.isError) {
+    if (rewrites.delete(e.toolCallId) && !isError) {
       text += `\n${rewriteNudge("write", true, true)}`;
       changed = true;
     }
     const capped = wholeReads.delete(e.toolCallId) ? null : lim.cap(text);
-    return capped === null && !changed ? undefined : { content: [{ type: "text" as const, text: capped ?? text }] };
+    return capped === null && !changed ? undefined : { content: [{ type: "text" as const, text: capped ?? text }], ...(forgiven ? { isError } : {}) };
   });
 
   // Pi's own compaction, sized for the window (src/picompact.ts, F7): cancelled while tinyCode's masking can still
@@ -587,6 +618,11 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     if (pressed && ctx.hasUI) ctx.ui.notify(`tinyCode: context pressure, masked ${pressed.results} old result(s) and ${pressed.calls} old reply(ies): ${pressed.tokensBefore} -> ${pressed.tokensAfter} tokens`, "info");
     // S4b: the todo and notes go last, as a user message (tail only: the prefix and the cache stay as they were).
     const out = withTail(masked ?? (messages as never), lim.todo, lim.outputLimitHit, lim.tailNotes.splice(0), nudgeTodo) ?? masked ?? (checked || folded || turned ? (messages as never) : undefined);
+    // last of all (src/alternate.ts): strict chat templates (Mistral) need user/assistant to alternate, so adjacent
+    // user-role messages become one and a user message right after tool results is folded into the last result
+    const sent = (out ?? e.messages) as never as Parameters<typeof alternate>[0];
+    const alt = alternate(sent, (ms) => convertToLlm(ms as never) as never);
+    if (alt.merged + alt.folded > 0) return { messages: alt.messages as never };
     return out ? { messages: out as never } : undefined;
   });
 

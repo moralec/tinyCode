@@ -439,8 +439,10 @@ test("the extension: heartbeats and stuck lines never reach the model's context;
     { role: "user", content: t("fix it"), timestamp: 1 },
     { role: "custom", customType: "tinycode-beat", content: "Still working on your request \u2014 4 steps so far.", display: true, timestamp: 2 },
     { role: "custom", customType: "tinycode-hint", content: "tinyCode hint: use `fix`.", display: false, timestamp: 3 },
-  ] }, ctx) as { messages: { customType?: string; role: string }[] };
-  assert.deepEqual(out.messages.map((m) => m.customType ?? m.role), ["user", "tinycode-hint"]);
+  ] }, ctx) as { messages: { customType?: string; role: string; content: { text: string }[] }[] };
+  // the hint stays, merged into the user message before it (strict chat templates need alternating roles)
+  assert.deepEqual(out.messages.map((m) => m.customType ?? m.role), ["user"]);
+  assert.deepEqual(out.messages[0]!.content.map((p) => p.text), ["fix it\n\ntinyCode hint: use `fix`."]);
 });
 
 test("the extension, undoWorse default (undoWorseFrom 2): a first break gets the old line and is left for the model; the same break again is undone", async () => {
@@ -459,4 +461,8 @@ test("the extension, undoWorse default (undoWorseFrom 2): a first break gets the
   assert.equal(readFileSync(join(cwd, "bowling.py"), "utf8"), "v2 broken\n", "a first break may be fixed forward");
   assert.match((await exec("run_tests")).content[0]!.text, /\nEdit made 21 more fail: best tree back \(24\/31\)\. Try another way\.$/);
   assert.equal(readFileSync(join(cwd, "bowling.py"), "utf8"), "v1\n");
+});
+
+test("the diet keeps MCP tools", () => {
+  assert.deepEqual(toolSet(["read", "fix", "mcp__web__web_fetch", "todo"], { diet: true, best: false }), ["read", "mcp__web__web_fetch", "todo"]);
 });

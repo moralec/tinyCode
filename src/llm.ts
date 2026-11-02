@@ -3,6 +3,7 @@
 // fallback lane. A wrong answer is never retried here. Every attempt appends a line to the call log.
 import { loadConfig, type Config, type Lane } from "./config.ts";
 import { logCall } from "./log.ts";
+import { alternate, type AltMsg } from "./alternate.ts";
 
 export interface Message {
   role: "system" | "user" | "assistant";
@@ -175,6 +176,7 @@ async function attempt(
 }
 
 export async function chat(step: string, messages: Message[], opts: ChatOptions = {}): Promise<ChatResult> {
+  messages = alternate(messages as never as AltMsg[]).messages as never as Message[]; // strict templates: user runs merge
   const cfg = opts.config ?? loadConfig(opts.env ?? process.env);
   const st = cfg.steps[step as keyof Config["steps"]];
   if (!st) throw new LlmError(`unknown step ${JSON.stringify(step)}`, "CONFIG");

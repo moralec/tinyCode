@@ -22,7 +22,7 @@ import { lintPass, type LintOptions } from "../lint.ts";
 import type { ChatOptions, ChatResult, Message } from "../llm.ts";
 import { SESSION } from "../llm.ts";
 import { logPath } from "../log.ts";
-import { applyReply, type ApplyResult } from "../protocol/apply.ts";
+import { applyReply, isTestPath, type ApplyResult } from "../protocol/apply.ts";
 import { SYSTEM } from "../protocol/prompts.ts";
 import { failingNames, failureBlocks, firstErrorLine, parseCounts, runTests, type TestCounts, type TestRun } from "../testrun.ts";
 import { failingTestsCode, fence, fitFixed, fitHead, type Fit, type FitOpts, type QuickHead } from "./quickfit.ts";
@@ -99,14 +99,12 @@ export function undoDir(cwd: string, env: Env = process.env, slot = ""): string 
 }
 
 const SOURCE_EXT = /\.(py|js|ts|sh)$/;
-const TEST_FILE = /(^|\/)(tests?|__tests__)\/|(^|\/)test_[^/]*$|[._](test|spec)\.[a-z]+$|_test\.[a-z]+$|(^|\/)conftest\.py$/i;
-
-/** A test file by its path (tests/ dirs, test_*.py, *_test.*, *.test.*, *.spec.*, conftest.py). */
-export const isTestPath = (rel: string): boolean => TEST_FILE.test(rel);
+/** A test file by its path (tests/ dirs, test_*.py, *_test.*, *.test.*, *.spec.*, conftest.py): one rule, src/protocol/apply.ts */
+export { isTestPath };
 
 /** The one non-test source file of the tree (repoFiles), or null when there are none or several. */
 export function soleSource(cwd: string, test?: string | null): string | null {
-  const src = repoFiles(cwd).filter((f) => SOURCE_EXT.test(f) && f !== test && !TEST_FILE.test(f) && !/(^|\/)__init__\.py$/.test(f));
+  const src = repoFiles(cwd).filter((f) => SOURCE_EXT.test(f) && f !== test && !isTestPath(f) && !/(^|\/)__init__\.py$/.test(f));
   return src.length === 1 ? src[0]! : null;
 }
 
@@ -116,8 +114,10 @@ const BEST_SLOT = ".best";
 interface Manifest {
   cwd: string;
   ts: string;
-  /** every text file present when the snapshot was taken */
+  /** every text file copied when the snapshot was taken */
   files: string[];
+  /** files present but too big to copy (over MAX_SNAPSHOT_FILE, or past MAX_SNAPSHOT_TOTAL): never rewritten, never removed */
+  skipped?: string[];
 }
 
 /** Copy every text file of the tree (repoFiles) to the undo dir. Replaces any earlier snapshot of this cwd. */
@@ -126,6 +126,7 @@ export function takeSnapshot(cwd: string, env: Env = process.env, slot = ""): Ma
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(join(dir, "files"), { recursive: true });
   const files: string[] = [];
+  const skipped: string[] = [];
   let total = 0;
   for (const f of repoFiles(cwd)) {
     const abs = join(cwd, f);
@@ -135,14 +136,17 @@ export function takeSnapshot(cwd: string, env: Env = process.env, slot = ""): Ma
     } catch {
       continue;
     }
-    if (size > MAX_SNAPSHOT_FILE || total + size > MAX_SNAPSHOT_TOTAL) continue;
+    if (size > MAX_SNAPSHOT_FILE || total + size > MAX_SNAPSHOT_TOTAL) {
+      skipped.push(f);
+      continue;
+    }
     total += size;
     const dst = join(dir, "files", f);
     mkdirSync(dirname(dst), { recursive: true });
     writeFileSync(dst, readFileSync(abs));
     files.push(f);
   }
-  const manifest: Manifest = { cwd: resolve(cwd), ts: new Date().toISOString(), files };
+  const manifest: Manifest = { cwd: resolve(cwd), ts: new Date().toISOString(), files, skipped };
   writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
   return manifest;
 }
@@ -179,7 +183,7 @@ export interface RestoreResult {
 export function treeHash(cwd: string): string {
   const h = createHash("sha1");
   for (const f of [...repoFiles(cwd)].sort()) {
-    if (TEST_FILE.test(f)) continue;
+    if (isTestPath(f)) continue;
     try {
       if (statSync(join(cwd, f)).size > MAX_SNAPSHOT_FILE) continue;
       h.update(f).update("\0").update(readFileSync(join(cwd, f))).update("\0");
@@ -216,7 +220,7 @@ export function restoreSnapshot(cwd: string, env: Env = process.env, slot = "", 
       restored.push(f);
     }
   }
-  const was = new Set(m.files);
+  const was = new Set([...m.files, ...(m.skipped ?? [])]); // a file that existed then is never removed
   for (const f of repoFiles(cwd)) {
     if (!was.has(f) && !leave?.(f)) {
       rmSync(join(cwd, f), { force: true });
@@ -233,7 +237,9 @@ export function changedSinceSnapshot(cwd: string, env: Env = process.env): strin
   if (!m) return [];
   const dir = join(undoDir(cwd, env), "files");
   const out: string[] = [];
+  const skipped = new Set(m.skipped ?? []);
   for (const f of new Set([...m.files, ...repoFiles(cwd)])) {
+    if (skipped.has(f)) continue; // too big to compare: not reported as changed
     let have: Buffer;
     try {
       have = readFileSync(join(cwd, f));
@@ -733,7 +739,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
       pg.step("edit");
       const r1 = await callR("edit", msgs, { maxTokens: editFit.maxTokens });
       reply = r1.text;
-      let res = await applyReply(reply, { cwd, protected: protectedPaths });
+      let res = await applyReply(reply, { cwd, protected: protectedPaths, env });
       for (const f of res.applied) pg.touch(String(f));
       let t = await runTest();
       out = t.text;
@@ -763,7 +769,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
         );
         pg.step("second edit");
         reply = await call("edit", msgs);
-        res = await applyReply(reply, { cwd, protected: protectedPaths });
+        res = await applyReply(reply, { cwd, protected: protectedPaths, env });
         for (const f of res.applied) pg.touch(String(f));
         t = await runTest();
         out = t.text;
@@ -804,7 +810,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
           sayFit("rung1b", fit);
           pg.step("second try");
           const r2 = await callR("edit", fit.msgs, { maxTokens: fit.maxTokens, ...(seed !== undefined ? { seed } : {}) });
-          res = await applyReply(r2.text, { cwd, protected: protectedPaths });
+          res = await applyReply(r2.text, { cwd, protected: protectedPaths, env });
           for (const f of res.applied) pg.touch(String(f));
           t = await runTest();
           say(`rung1b: applied ${pyList(res.applied)} failed ${pyList(res.failed)} pass ${t.ok}`);

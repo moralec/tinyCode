@@ -26,7 +26,7 @@ export type LadderMode = "auto" | "ladder" | "pi";
  * "question; answer, no tool." hint for a request no workflow fits. `edit` is accepted for `edit_file`.
  */
 export const INTERCEPTABLE = ["fix", "edit_file", "add", "explain", "test", "doc", "review", "commit", "plan", "build", "research", "ask"] as const;
-export type StepName = "route" | "pick" | "edit" | "review" | "branch" | "hunk" | "plan" | "research" | "explain" | "doc" | "ask" | "commit" | "loop";
+export type StepName = "route" | "pick" | "edit" | "review" | "branch" | "hunk" | "plan" | "research" | "explain" | "doc" | "ask" | "commit" | "loop" | "digest";
 
 export interface Config {
   lanes: Record<string, Lane | null>;
@@ -112,6 +112,10 @@ export interface Config {
     undoWorse: boolean;
     /** undoWorse acts from the Nth time the same break (counts and failing names) is seen since the best: 1 = at once; 2 = a first break gets the "Worse than best" line and may be fixed forward */
     undoWorseFrom: number;
+    /** Pi's edit failed with "Could not find": retried with whole lines compared after their indentation (one shift for all
+     *  lines, exactly one place per edit, all edits[] or none, the replacement re-indented); "Found N occurrences": the
+     *  result lists each occurrence's lines with the nearest line above and below (src/forgive.ts). Never a test file. */
+    forgiveEdits: boolean;
     /** a file a workflow just wrote or kept for a hand-over is served whole on its first read (no view or result cap) when it has at most this many lines */
     freshFileLines: number;
     /** test runs in a row without beating the best: best restored, model told to stop and report (0 = off) */
@@ -120,6 +124,8 @@ export interface Config {
     autoContinue: number;
     /** the system prompt tells the model to write a file and run it when a debug script would pass this many lines */
     scriptLines: number;
+    /** a project context file (AGENTS.md / CLAUDE.md in Pi's system prompt) over this many tokens is replaced by its digest, an outline until the digest is made (src/context/digest.ts); 0 = off */
+    contextFileTokens: number;
     maxTokens: Record<string, number>;
   };
   /** "auto" (default): tinyCode asks no diagnostic questions; "dev": shows stuck confirm, router hint, events, per-call tokens (/dev on|off) */
@@ -197,6 +203,8 @@ export const DEFAULTS: Config = {
     ask: { lane: "small", fallback: null },
     commit: { lane: "small", fallback: null },
     loop: { lane: "trunk", fallback: null },
+    // context-file digests (operator 2026-11-02): one background call per file version, the small lane by default
+    digest: { lane: "small", fallback: null },
   },
   // Defaults set from the round-2 ladder runs (our round-2 benchmark, contender "ladder"):
   //  - gemma-4-12b: 10/10 at 3.1 calls and ~5.6k prompt tokens per task (8 rung 1, 1 rung 2, 1 Pi); tc1 alone 9/10,
@@ -262,10 +270,15 @@ export const DEFAULTS: Config = {
     // 2: only a repeated break (operator 2026-10-30). The 16k v2 passes went through worse trees and fixed forward
     // (bowling r2 28/31 -> 3/31 -> 25/31 -> 31/31, paasio r3 22 -> 12 -> 23 -> 25, sgf r1 16 -> 6 -> 18); 1 = at once
     undoWorseFrom: 2,
+    // Nemotron-Nano-9B-v2 16k (runs-radar 2026-10-30, tinyCode arm): 37 of 72 "Could not find" edits had the right lines
+    // under one indentation shift (dot-dsl 35 of 36), retried unchanged until the 10-minute cap
+    forgiveEdits: true,
     freshFileLines: 300,
     stuckTestRuns: 3,
     autoContinue: 1,
     scriptLines: 20,
+    // operator 2026-11-02: a 78 KB CLAUDE.md filled ~20k of a 32k window; ~1.5k tokens keeps the rules, not the history
+    contextFileTokens: 1500,
     maxTokens: { pick: 300, edit: 4096, review: 600, branch: 180, hunk: 600, route: 200, plan: 2500, research: 200, explain: 400, doc: 1500, ask: 600, commit: 300 },
   },
   mode: "auto",
@@ -330,12 +343,12 @@ export function validate(cfg: Config): Config {
   if (!(typeof cfg.limits.checkpointMinSave === "number" && cfg.limits.checkpointMinSave >= 0 && cfg.limits.checkpointMinSave < 1)) throw new ConfigError("limits.checkpointMinSave: must be a share of the context window in [0, 1)");
   if (!(Number.isInteger(cfg.limits.checkpointGap) && cfg.limits.checkpointGap >= 1)) throw new ConfigError("limits.checkpointGap: must be an integer >= 1 (model calls)");
   if (!(typeof cfg.limits.checkpointKeepFiles === "number" && cfg.limits.checkpointKeepFiles >= 0 && cfg.limits.checkpointKeepFiles < 1)) throw new ConfigError("limits.checkpointKeepFiles: must be a share of the usable prompt in [0, 1) (0 = off)");
-  for (const k of ["checkpointBackoff", "checkpointSkipSame", "undoWorse"] as const)
+  for (const k of ["checkpointBackoff", "checkpointSkipSame", "undoWorse", "forgiveEdits"] as const)
     if (typeof cfg.limits[k] !== "boolean") throw new ConfigError(`limits.${k}: must be true or false`);
   if (!(Number.isInteger(cfg.limits.undoWorseFrom) && cfg.limits.undoWorseFrom >= 1)) throw new ConfigError("limits.undoWorseFrom: must be an integer >= 1 (1 = at once)");
   for (const k of ["maskAboveTokens", "scriptLines", "freshFileLines"] as const)
     if (!(Number.isInteger(cfg.limits[k]) && cfg.limits[k] > 0)) throw new ConfigError(`limits.${k}: must be a positive integer`);
-  for (const k of ["stuckTestRuns", "autoContinue"] as const)
+  for (const k of ["stuckTestRuns", "autoContinue", "contextFileTokens"] as const)
     if (!(Number.isInteger(cfg.limits[k]) && cfg.limits[k] >= 0)) throw new ConfigError(`limits.${k}: must be an integer >= 0 (0 = off)`);
   for (const [name, lane] of Object.entries(cfg.lanes)) {
     if (lane === null) continue;

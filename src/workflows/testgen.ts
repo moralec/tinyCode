@@ -410,7 +410,7 @@ export async function runTestGen(args: TestGenArgs, deps: TestGenDeps): Promise<
     const f = testBlocksOnly(reply, target.file);
     if (f.refused.length) say(`refused (not a test file): ${JSON.stringify(f.refused)}`);
     for (const p of f.kept) if (!origs.has(p)) origs.set(p, readText(cwd, p));
-    const r = await applyBlocks(f.reply, { cwd, protected: [] });
+    const r = await applyBlocks(f.reply, { cwd, protected: [], env });
     if (r.failed.length) say(`not applied: ${JSON.stringify(r.failed)}`);
     const bad = guardCode(cwd, codeBefore);
     if (bad.length) say(`refused: code files changed by the edit were put back: ${JSON.stringify(bad)}`);

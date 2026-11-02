@@ -267,7 +267,8 @@ export class ToolDiet {
  */
 export function toolSet(baseline: string[], o: { diet: boolean; best: boolean }): string[] {
   const loop = LOOP_TOOLS as readonly string[];
-  const base = baseline.filter((n) => n !== RESTORE_TOOL && (!o.diet || loop.includes(n)));
+  // MCP tools (mcp__<server>__<tool>) are the user's own, not tinyCode workflows: the diet keeps them (web_fetch, ...)
+  const base = baseline.filter((n) => n !== RESTORE_TOOL && (!o.diet || loop.includes(n) || n.startsWith("mcp__")));
   return o.best ? [...base, RESTORE_TOOL] : base;
 }
 

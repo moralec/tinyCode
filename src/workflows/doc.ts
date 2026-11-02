@@ -13,6 +13,7 @@
 // failure leaves the file untouched. Only then the file is written and the project's lint auto-fix runs.
 // Other file types are refused (no way to promise "comments only"); .jsx/.tsx too. Pure logic with injected
 // dependencies; pure Node (no Unix tools). No model call here ever sees more than the symbols of its batch.
+import { PATH_RULE } from "../protocol/prompts.ts";
 import { NOOP_PROGRESS, type Progress } from "../progress.ts";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -38,14 +39,14 @@ const SNIPPET_LINES = 40;
 
 export const DOC_RULES = `Add documentation to code. Reply ONLY edit blocks, one per symbol, exactly:
 
-path/to/file
+shop/cart.py
 <<<<<<< SEARCH
 exact lines copied from the file: the def/class/function line(s) and first body line
 =======
 same lines with the documentation added
 >>>>>>> REPLACE
 
-Add or improve comments and docstrings ONLY. Never change, add, remove, reorder, rename or reformat code, not even whitespace. SEARCH matches file exactly and is unique (include first body line). Python: docstring right after the def/class line, indented like the body: one summary line, Args/Returns only when not obvious. JavaScript/TypeScript: /** ... */ above the declaration, same indent, @param/@returns only when not obvious. Say what the code does, from the shown code; invent no behaviour. No explanations outside the blocks.`;
+${PATH_RULE} Add or improve comments and docstrings ONLY. Never change, add, remove, reorder, rename or reformat code, not even whitespace. SEARCH matches file exactly and is unique (include first body line). Python: docstring right after the def/class line, indented like the body: one summary line, Args/Returns only when not obvious. JavaScript/TypeScript: /** ... */ above the declaration, same indent, @param/@returns only when not obvious. Say what the code does, from the shown code; invent no behaviour. No explanations outside the blocks.`;
 
 export interface DocArgs {
   mode: "comments" | "readme";
