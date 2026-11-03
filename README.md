@@ -32,6 +32,28 @@ Everything else (questions, edits, new code, reviews) goes to Pi exactly as with
 are there as explicit commands (`/explain`, `/doc`, `/review`, …) but are not used automatically yet: in our tests
 they were not better than plain Pi.
 
+## How it works
+
+tinyCode sits on top of Pi and helps a small local model finish coding tasks in a small context window. When you ask
+for something, it first decides what kind of job it is and sends it to the matching workflow, or leaves it to plain
+Pi when unsure **(routing)**. For a fix, it tries a cheap shortcut first: code gathers the right files and failing
+tests, asks the model for one edit, and applies and tests it straight away **(the quick try)**. If that does not solve
+it, Pi's own loop takes over: the model reads, edits and runs tests turn after turn. tinyCode watches that loop so it
+keeps its best result, undoes edits that make things worse, and is nudged when it is stuck **(loop steadiness)**. All
+the time, tinyCode keeps what the model reads small enough to fit the window: tool output is capped, old results are
+hidden, and the history is folded into a note at milestones **(window budget)**. It makes sure edits land when
+they are slightly off **(edit robustness)**, and it reports the result in a short, fixed shape a person or another
+agent can act on **(handoff)**.
+
+```
+request → routing → quick try → loop steadiness → handoff
+            └──── window budget and edit robustness, throughout ────┘
+```
+
+Each of these six families is a set of features with its own switch. We are measuring them one family at a time,
+each feature on its own, starting where runs are lost today (loop steadiness), and the results will be published
+here as they come in.
+
 ## Results
 
 We ran the same five coding tasks with plain Pi and with Pi + tinyCode on three tested setups: each a card with a
