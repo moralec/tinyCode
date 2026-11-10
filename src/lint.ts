@@ -1,8 +1,11 @@
-// Formatter/linter auto-fix after an editing workflow (README rule 13). Shared by /add, /edit and /fix.
+// Formatter/linter auto-fix after an editing workflow (README rule 13). Shared by /add, /edit, /doc, /fix and /test.
 // Detects ruff, black, prettier and eslint from the project's own config files, runs a tool only when it is both
-// configured and installed (cwd's node_modules/.bin or .venv, else PATH), never installs anything, and only passes
-// the files the workflow changed. Pure Node: no Unix tools, paths through node:path, user tools spawned with
-// shell: true. `autoFix` returns what ran and a `revert` so the caller can undo the pass if its check then fails.
+// configured and installed, never installs anything, and only passes the files the workflow changed. Pure Node: no
+// Unix tools, paths through node:path, tools spawned with an argument list and no shell (file names are never shell
+// text). `autoFix` returns what ran and a `revert` so the caller can undo the pass if its check then fails.
+// Trust (security audit 2026-11-09): the project's own binaries (node_modules/.bin, .venv) and the Node tools, which
+// load code from the project (JS configs, plugins, shared configs), run only when the workflow already runs project
+// code (`trustRepo`: /fix, /add, /test, /edit with a test). Otherwise only ruff and black from PATH run.
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, extname, isAbsolute, join, relative, resolve } from "node:path";
@@ -42,11 +45,11 @@ export function detectConfigured(cwd: string): LintTool[] {
   return out;
 }
 
-/** The executable for a tool, or null when it is not installed: project-local first, then PATH. */
-export function findTool(tool: LintTool, cwd: string, env: Record<string, string | undefined> = process.env): string | null {
+/** The executable for a tool, or null when it is not installed: project-local first (only when `local`), then PATH. */
+export function findTool(tool: LintTool, cwd: string, env: Record<string, string | undefined> = process.env, local = true): string | null {
   const win = process.platform === "win32";
   const exts = win ? ["", ".exe", ".cmd", ".bat"] : [""];
-  const dirs = [join(cwd, "node_modules", ".bin"), join(cwd, ".venv", win ? "Scripts" : "bin"), join(cwd, "venv", win ? "Scripts" : "bin")];
+  const dirs = local ? [join(cwd, "node_modules", ".bin"), join(cwd, ".venv", win ? "Scripts" : "bin"), join(cwd, "venv", win ? "Scripts" : "bin")] : [];
   dirs.push(...(env.PATH ?? env.Path ?? "").split(delimiter).filter(Boolean));
   for (const d of dirs) {
     for (const e of exts) {
@@ -65,12 +68,20 @@ export interface ExecResult {
   code: number | null;
   out: string;
 }
-export type ExecFn = (command: string, cwd: string) => Promise<ExecResult>;
+/** `command` is for the report; `argv` (executable first) is what runs. */
+export type ExecFn = (command: string, cwd: string, argv: string[]) => Promise<ExecResult>;
 
-/** Default runner: shell: true, output captured, 120 s limit. */
-export const execShell: ExecFn = (command, cwd) =>
+const WIN_SCRIPT = /\.(cmd|bat)$/i;
+/** Windows .cmd/.bat shims need cmd.exe; file names with its metacharacters are not passed to one (autoFix). */
+const WIN_UNSAFE = /[&|<>^%"!()`$;]/;
+
+/** Default runner: argument list, no shell (except a Windows .cmd/.bat shim), output captured, 120 s limit. */
+export const execShell: ExecFn = (command, cwd, argv) =>
   new Promise((done) => {
-    const child = spawn(command, { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const viaCmd = process.platform === "win32" && WIN_SCRIPT.test(argv[0]!);
+    const child = viaCmd
+      ? spawn(command, { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"], windowsHide: true })
+      : spawn(argv[0]!, argv.slice(1), { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     const chunks: Buffer[] = [];
     child.stdout.on("data", (d: Buffer) => chunks.push(d));
     child.stderr.on("data", (d: Buffer) => chunks.push(d));
@@ -116,6 +127,8 @@ export interface LintOptions {
   env?: Record<string, string | undefined>;
   exec?: ExecFn;
   find?: typeof findTool;
+  /** the workflow already runs project code (its tests): project-local binaries and the Node tools may run too */
+  trustRepo?: boolean;
 }
 
 const bytes = (abs: string): Buffer | null => {
@@ -144,7 +157,12 @@ export async function autoFix(opts: LintOptions): Promise<LintReport> {
   report.revert = () => {
     for (const [f, b] of before) if (b) writeFileSync(join(cwd, f), b);
   };
-  const configured = detectConfigured(cwd);
+  const trust = opts.trustRepo === true;
+  const configured = detectConfigured(cwd).filter((t) => {
+    if (trust || t === "ruff" || t === "black") return true;
+    report.lines.push(`lint: ${t} skipped: it can load code from the project (configs, plugins) and this workflow runs none`);
+    return false;
+  });
   const forExt = (exts: Set<string>) => rels.filter((f) => exts.has(extname(f).toLowerCase()));
 
   const plan: { tool: LintTool; args: string; files: string[] }[] = [];
@@ -167,7 +185,7 @@ export async function autoFix(opts: LintOptions): Promise<LintReport> {
   }
   const exe = new Map<LintTool, string | null>();
   for (const p of plan) {
-    if (!exe.has(p.tool)) exe.set(p.tool, find(p.tool, cwd, opts.env ?? process.env));
+    if (!exe.has(p.tool)) exe.set(p.tool, find(p.tool, cwd, opts.env ?? process.env, trust));
     const path = exe.get(p.tool);
     if (!path) {
       if (!report.missing.includes(p.tool)) {
@@ -176,9 +194,13 @@ export async function autoFix(opts: LintOptions): Promise<LintReport> {
       }
       continue;
     }
+    if (process.platform === "win32" && WIN_SCRIPT.test(path)) p.files = p.files.filter((f) => !WIN_UNSAFE.test(f));
+    if (!p.files.length) continue;
     const command = `${quote(path)} ${p.args} ${p.files.map(quote).join(" ")}`;
+    // a name that starts with "-" is passed as ./name, so no tool reads it as an option
+    const argv = [path, ...p.args.split(" "), ...p.files.map((f) => (f.startsWith("-") ? `./${f}` : f))];
     const snap = new Map(p.files.map((f) => [f, bytes(join(cwd, f))] as const));
-    const r = await exec(command, cwd);
+    const r = await exec(command, cwd, argv);
     const changed = p.files.filter((f) => {
       const a = snap.get(f);
       const b = bytes(join(cwd, f));
@@ -201,7 +223,7 @@ export interface LintPass {
 }
 
 /** Run autoFix for the changed files, report what ran, and undo the pass if it broke the workflow's check. */
-export async function lintPass(opts: Pick<LintOptions, "cwd" | "files" | "env">, pass: LintPass): Promise<LintReport> {
+export async function lintPass(opts: Pick<LintOptions, "cwd" | "files" | "env" | "trustRepo">, pass: LintPass): Promise<LintReport> {
   const r = await autoFix({ ...opts, ...pass.lint });
   for (const l of r.lines) pass.report(l);
   if (r.changed.length && pass.verify && !(await pass.verify())) {

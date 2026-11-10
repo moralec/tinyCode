@@ -7,9 +7,11 @@
 // Languages: Python ("py") and JavaScript/TypeScript ("js", for .js .mjs .cjs .ts .mts .cts). JSX/TSX are refused
 // (JSX text can hold quotes and slashes that are not code, so no tokenizer here can tell). Any other file type: not
 // supported, the caller refuses.
-// Known limits, all on the safe side except the first: a JS regex literal the heuristic takes for a division can hide
-// a change inside it from the comparison (the compile check is the second net); Python f-strings that reuse their own
-// quote inside the braces (3.12) end the string early, which can only make the comparison stricter or fail the check.
+// Known limits: a JS regex literal the heuristic takes for a division (after ")" or a name) could hide a change inside
+// it, so every comment from such a "/" to the end of its line is marked ambiguous and sameCode requires those to be
+// identical (security audit 2026-11-09; the cost is refusing a trailing comment added after a division). An f-string
+// is never a docstring: Python evaluates it. Python f-strings that reuse their own quote inside the braces (3.12) end
+// the string early, which can only make the comparison stricter or fail the check.
 import { extname } from "node:path";
 
 export type Lang = "py" | "js";
@@ -30,6 +32,8 @@ export interface Span {
   start: number;
   /** exclusive */
   end: number;
+  /** JS comment after a "/" taken for a division where a regex could start (same line): compared, never dropped */
+  ambiguous?: boolean;
 }
 
 interface PyTok {
@@ -149,10 +153,13 @@ function pyScan(src: string): PyScan {
   // docstrings and the other strings
   const doc = new Set<number>();
   lines.forEach((ln, idx) => {
-    const only = toks.slice(ln.first, ln.last + 1).every((t) => t.type === "str");
+    // a docstring is a constant: an f-string (any prefix with f) is an expression Python evaluates, so it stays code
+    const constant = (t: PyTok) => t.type === "str" && !/f/i.test(t.text.match(/^[A-Za-z]*/)![0]);
+    const only = toks.slice(ln.first, ln.last + 1).every(constant);
     if (!only) return;
     const prev = lines[idx - 1];
-    const header = prev && toks[prev.last]!.text === ":" && ["def", "class", "async"].includes(toks[prev.first]!.text);
+    const head = prev ? toks[prev.first]!.text : "";
+    const header = prev && toks[prev.last]!.text === ":" && (head === "def" || head === "class" || (head === "async" && toks[prev.first + 1]?.text === "def"));
     if (idx === 0 || header) for (let k = ln.first; k <= ln.last; k++) doc.add(k);
   });
   toks.forEach((t, k) => {
@@ -230,18 +237,21 @@ function jsRegexEnd(src: string, i: number): number {
 function jsScan(src: string): Span[] {
   const spans: Span[] = [];
   let prev = ""; // last significant token: a punctuation char, "num", or a word
+  let ambiguous = false; // a "/" on this line was taken for a division where a regex could start (see the header)
   let i = 0;
+  const comment = (start: number, end: number): Span =>
+    JS_DIRECTIVE.test(src.slice(start, end)) ? { kind: "string", start, end } : { kind: "comment", start, end, ...(ambiguous ? { ambiguous: true } : {}) };
   while (i < src.length) {
     const c = src[i]!;
     if (c === "/" && src[i + 1] === "/") {
       let j = src.indexOf("\n", i);
       if (j < 0) j = src.length;
-      spans.push({ kind: JS_DIRECTIVE.test(src.slice(i, j)) ? "string" : "comment", start: i, end: j });
+      spans.push(comment(i, j));
       i = j;
     } else if (c === "/" && src[i + 1] === "*") {
       const e = src.indexOf("*/", i + 2);
       const j = e < 0 ? src.length : e + 2;
-      spans.push({ kind: JS_DIRECTIVE.test(src.slice(i, j)) ? "string" : "comment", start: i, end: j });
+      spans.push(comment(i, j));
       i = j;
     } else if (c === "#" && i === 0 && src[1] === "!") {
       let j = src.indexOf("\n");
@@ -266,6 +276,7 @@ function jsScan(src: string): Span[] {
         i = e;
         prev = "str";
       } else {
+        if (prev === ")" || /^[A-Za-z_$]/.test(prev)) ambiguous = true;
         prev = "/";
         i++;
       }
@@ -280,6 +291,7 @@ function jsScan(src: string): Span[] {
       prev = "num";
       i = j;
     } else if (/\s/.test(c)) {
+      if (c === "\n") ambiguous = false;
       i++;
     } else {
       prev = c;
@@ -326,7 +338,11 @@ export function stripped(lang: Lang, src: string, spans: Span[] = scan(lang, src
 }
 
 export function sameCode(lang: Lang, a: string, b: string): boolean {
-  return stripped(lang, a) === stripped(lang, b);
+  if (stripped(lang, a) !== stripped(lang, b)) return false;
+  if (lang === "py") return true;
+  // comments that may sit inside a regex literal the scanner took for a division must not change (see the header)
+  const amb = (src: string) => jsScan(src).filter((s) => s.ambiguous).map((s) => src.slice(s.start, s.end)).join("\n");
+  return amb(a) === amb(b);
 }
 
 // ---------------------------------------------------------------- symbols

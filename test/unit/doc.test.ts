@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { tmpDir } from "./tmpdir.ts";
@@ -300,4 +300,36 @@ test("/doc on one file naming several symbols asks for each of them; every/all a
   assert.deepEqual(await ask("write docstrings for clamp and grow in calc.py"), ["- function clamp", "- method Box.grow"]);
   assert.deepEqual(await ask("write a docstring for clamp in calc.py"), ["- function clamp"]);
   assert.equal((await ask("docstrings for every function in calc.py, clamp included")).length, 6);
+});
+
+test("makeCompile: a documented file named py_compile.py is compiled, never imported (security audit 2026-11-09)", async () => {
+  const d = tmpDir("tc-docshadow-");
+  const mark = join(d, "SELF_RAN");
+  const r = await makeCompile(PY)("py", "pkg/py_compile.py", `open(${JSON.stringify(mark)}, "w").write("1")\ndef f():\n    pass\n`);
+  assert.equal(r.ok, true);
+  assert.equal(existsSync(mark), false);
+  const bad = await makeCompile(PY)("py", "pkg/mod.py", "def f(:\n");
+  assert.equal(bad.ok, false);
+  assert.match(bad.message, /mod\.py/, "errors still name the real file");
+});
+
+test("sameCode (Python): an f-string in docstring position is code, not a docstring (security audit 2026-11-09)", () => {
+  const src = "import os\n\ndef f():\n    return 1\n\nasync def g():\n    return 2\n";
+  const evil = `f"""{__import__('os').system('id')}"""`;
+  assert.ok(!sameCode("py", src, `${evil}\n${src}`), "module level");
+  assert.ok(!sameCode("py", src, src.replace("def f():\n", `def f():\n    ${evil}\n`)), "function level");
+  assert.ok(!sameCode("py", src, src.replace("def f():\n", `def f():\n    """Doc.""" f"{print(1)}"\n`)), "implicit concatenation");
+  assert.ok(!sameCode("py", src, src.replace("def f():\n", `def f():\n    rf"""{print(1)}"""\n`)), "rf prefix");
+  assert.ok(sameCode("py", src, src.replace("def f():\n", `def f():\n    r"""Raw doc."""\n`)), "a raw docstring is still a docstring");
+  assert.ok(sameCode("py", src, src.replace("async def g():\n", `async def g():\n    """Doc."""\n`)), "async def has docstrings");
+  const w = "async def h(x):\n    async with x:\n        return 1\n";
+  assert.ok(!sameCode("py", w, w.replace("async with x:\n", 'async with x:\n        "not a docstring"\n')), "async with is no header");
+});
+
+test("sameCode (JS): a comment inside a regex the scanner takes for a division cannot hide code (security audit 2026-11-09)", () => {
+  const src = "if (ok) /^[a-z]+$/.test(s) && go();\nexport default /^x$/;\nconst half = (a + b) / 2;\n";
+  assert.ok(!sameCode("js", src, src.replace("/^[a-z]+$/", "/^/*0,require('child_process').execSync('id'),0*/[a-z]+$/")));
+  assert.ok(!sameCode("js", src, src.replace("/^x$/", "/^/*0,globalThis.M=1,0*/x$/")));
+  assert.ok(sameCode("js", src, "/** Gate. */\n" + src), "a JSDoc block on its own line is still fine");
+  assert.ok(!sameCode("js", src, src.replace("/ 2;", "/ 2; // the mean")), "the safe-side cost: a trailing comment after such a division is refused");
 });

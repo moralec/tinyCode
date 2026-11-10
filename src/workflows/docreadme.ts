@@ -21,13 +21,14 @@
 import { NOOP_PROGRESS, type Progress } from "../progress.ts";
 import { isDev } from "../mode.ts";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import type { Config } from "../config.ts";
 import { trackedFiles } from "../context/evidence.ts";
 import type { Message } from "../llm.ts";
 import { applyEdit } from "../protocol/apply.ts";
+import { checkInside, writeInside } from "../safewrite.ts";
 import type { ChatFn } from "./fix.ts";
 import { overviewTemplate } from "./overview-template.ts";
 
@@ -125,7 +126,9 @@ export interface PFile {
 
 function readText(abs: string): string | null {
   try {
-    if (statSync(abs).size > READ_CAP) return null;
+    // lstat: a tracked symlink is skipped, so a file outside the project never reaches the generated docs
+    const st = lstatSync(abs);
+    if (!st.isFile() || st.size > READ_CAP) return null;
     const buf = readFileSync(abs);
     if (buf.includes(0)) return null;
     return new TextDecoder("utf-8", { fatal: true }).decode(buf).replace(/\r\n/g, "\n");
@@ -368,11 +371,12 @@ export interface ReadmeFound {
   kind: ReadmeKind;
 }
 
-/** The project's README: the first of README_CANDIDATES that exists (README.html counts), or null. */
+/** The project's README: the first of README_CANDIDATES that is a regular file, not a symlink (README.html counts), or null. */
 export function findReadme(cwd: string): ReadmeFound | null {
   for (const rel of README_CANDIDATES) {
     try {
-      if (!statSync(join(cwd, rel)).isFile()) continue;
+      checkInside(cwd, rel);
+      if (!lstatSync(join(cwd, rel)).isFile()) continue;
     } catch {
       continue;
     }
@@ -1060,10 +1064,11 @@ export async function runOverview(args: ReadmeArgs, deps: ReadmeDeps): Promise<R
     files: notes.read.filter((p) => notes.lines.has(p)).map((p) => ({ path: p, does: notes.lines.get(p)! })),
     self_check: flagged,
   };
-  const outDir = args.out ? resolve(cwd, args.out) : join(cwd, "docs");
-  if (!createMd) mkdirSync(outDir, { recursive: true });
-  const outPath = createMd ? join(cwd, "README.md") : join(outDir, "overview.html");
-  writeFileSync(outPath, createMd ? renderReadmeMd(data) : renderPage(data));
+  // --out is the operator's own choice of directory; the default paths are inside the project, so a symlink there
+  // (committed by the repository) is refused instead of followed
+  const outDir = args.out ? resolve(cwd, args.out) : null;
+  if (outDir && !createMd) mkdirSync(outDir, { recursive: true });
+  const outPath = createMd ? writeInside(cwd, "README.md", renderReadmeMd(data)) : outDir ? writeInside(outDir, "overview.html", renderPage(data)) : writeInside(cwd, join("docs", "overview.html"), renderPage(data));
   pg.touch(outPath);
   const total = Object.values(eng.calls).reduce((a, b) => a + b, 0);
   say(`wrote ${outPath}`);
@@ -1431,7 +1436,7 @@ export async function runReadmeUpdate(args: ReadmeArgs, deps: ReadmeDeps): Promi
     return runOverview({ ...args, update: null }, deps);
   }
   const rel = found.rel;
-  const original = readFileSync(join(cwd, rel), "utf8");
+  const original = readFileSync(checkInside(cwd, rel), "utf8");
   const eol = original.includes("\r\n") ? "\r\n" : "\n";
   const src = original.replace(/\r\n/g, "\n");
   const secs = readmeSections(src, found.kind);
@@ -1608,7 +1613,7 @@ export async function runReadmeUpdate(args: ReadmeArgs, deps: ReadmeDeps): Promi
   }
   const next = spliceRaw(src, done);
   pg.touch(rel);
-  writeFileSync(join(cwd, rel), eol === "\r\n" ? next.replace(/\n/g, "\r\n") : next);
+  writeInside(cwd, rel, eol === "\r\n" ? next.replace(/\n/g, "\r\n") : next);
   pg.step("self-check");
   const checked = await selfCheck(done.map((d) => ["update", `${d.sec.title}: ${visible(d.text)}`] as [string, string]), notesText(notes, runs), eng);
   for (const f of checked) flagged.push(`${f.sentence} — ${f.why}`);

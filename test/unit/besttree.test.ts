@@ -7,6 +7,7 @@ import { BestTree, LOOP_SLOT, rewriteNudge } from "../../src/besttree.ts";
 import { isTestPath, restoreSnapshot, takeSnapshot, treeHash } from "../../src/workflows/fix.ts";
 import { dropDisplayOnly } from "../../src/orchestrate.ts";
 import { CUSTOM_BEAT } from "../../src/progress.ts";
+import { DEFAULTS, mergeConfig } from "../../src/config.ts";
 
 const c = (passed: number, failed: number) => ({ passed, failed });
 
@@ -260,4 +261,37 @@ test("treeHash: the same for the same non-test files; a source change or a new f
   assert.equal(treeHash(cwd), h1, "back to the same content: the same hash");
   writeFileSync(join(cwd, "helper.py"), "x\n");
   assert.notEqual(treeHash(cwd), h1);
+});
+
+test("best tree off (limits.loopBestTree=false): counts and verdicts are tracked, nothing is kept, said or restored", () => {
+  const t = new BestTree(3, 1, true, 1, false);
+  let shots = 0;
+  let restores = 0;
+  const snap = () => void shots++;
+  const restore = () => void restores++;
+  t.seed(c(10, 21), snap);
+  assert.deepEqual([t.has, t.offersRestore, shots], [true, false, 0], "seeded: counted, no snapshot, no restore_best");
+  assert.equal(t.observe(c(20, 11), snap, restore, { undo: () => ({}) }), null);
+  assert.deepEqual([t.verdict, shots], ["best", 0]);
+  assert.equal(t.observe(c(3, 28), snap, restore, { undo: () => ({}) }), null, "worse: no line, no undo");
+  assert.equal(t.verdict, "worse");
+  for (let i = 0; i < 4; i++) assert.equal(t.observe(c(3, 28), snap, restore), null, "no stuck stop either");
+  assert.equal(t.endRestore(() => ({})), null, "no end restore");
+  assert.equal(restores, 0);
+  assert.equal(t.continueLine(), "Tests still fail (3/31). Continue.", "the continue line (C15) does not depend on keeping the tree");
+});
+
+test("best tree on: offersRestore follows has", () => {
+  const t = new BestTree();
+  assert.equal(t.offersRestore, false);
+  t.observe(c(1, 1), () => {});
+  assert.equal(t.offersRestore, true);
+});
+
+test("config: loopBestTree and rewriteNudge default on, take booleans only", () => {
+  for (const k of ["loopBestTree", "rewriteNudge"] as const) {
+    assert.equal(DEFAULTS.limits[k], true);
+    assert.equal(mergeConfig({ limits: { [k]: false } }).limits[k], false);
+    assert.throws(() => mergeConfig({ limits: { [k]: "no" } }), new RegExp(`limits\\.${k}: must be true or false`));
+  }
 });

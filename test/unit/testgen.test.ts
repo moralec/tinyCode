@@ -283,3 +283,15 @@ test("pre-existing failures are listed separately and do not mask a new failing 
   assert.equal(r.outcome, "possible-bug");
   assert.ok(!lines.some((l) => l.includes("code files changed")));
 });
+
+test("revert never deletes an existing file a block reached by path resolution (security audit 2026-11-09)", async () => {
+  // tests/calc.py does not exist, so the SEARCH block resolves to calc.py (the code under test); guardCode puts it back,
+  // and the failed run's revert must restore it, not delete it
+  const { cwd, env } = py();
+  const misaddressed = block("tests/calc.py", "def add(a, b):", "def add(a, b):  # x");
+  const s = scripted([misaddressed, misaddressed]);
+  const { r } = await run(cwd, env, s.chat, "write tests for add", { runTests: async () => ({ ok: false, text: "FAIL no tests ran in 0.00s", counts: null }) });
+  assert.notEqual(r.outcome, "pass");
+  assert.equal(existsSync(join(cwd, "calc.py")), true, "calc.py survives");
+  assert.equal(read(cwd, "calc.py"), CALC);
+});

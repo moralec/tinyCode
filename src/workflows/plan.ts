@@ -4,10 +4,11 @@
 // code validates it. Pure logic with injected dependencies (chat, confirm), like fix.ts and review.ts.
 import { parseTaskFile } from "./cachefiles.ts";
 import { NOOP_PROGRESS, type Progress } from "../progress.ts";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import { outline } from "../context/outline.ts";
+import { checkInside, writeInside } from "../safewrite.ts";
 import type { Message } from "../llm.ts";
 import type { ChatFn } from "./fix.ts";
 
@@ -256,12 +257,17 @@ export async function runPlan(args: PlanArgs, deps: PlanDeps): Promise<PlanResul
   }
   const plan = result.plan;
   pg.step("save");
-  const dir = join(deps.cwd, ".tinycode");
-  const file = join(dir, "plan.json");
-  mkdirSync(dir, { recursive: true });
-  if (existsSync(file)) renameSync(file, join(dir, "plan.prev.json"));
-  writeFileSync(file, JSON.stringify(plan, null, 2) + "\n");
-  writeFileSync(join(dir, "PLAN.md"), planMarkdown(plan));
+  // .tinycode/ and its files may be committed by the repository: refuse a symlink anywhere on the way (src/safewrite.ts)
+  const prev = checkInside(deps.cwd, join(".tinycode", "plan.json"));
+  let had = false;
+  try {
+    had = lstatSync(prev).isFile();
+  } catch {
+    // no earlier plan
+  }
+  if (had) renameSync(prev, checkInside(deps.cwd, join(".tinycode", "plan.prev.json")));
+  const file = writeInside(deps.cwd, join(".tinycode", "plan.json"), JSON.stringify(plan, null, 2) + "\n");
+  writeInside(deps.cwd, join(".tinycode", "PLAN.md"), planMarkdown(plan));
   pg.touch(".tinycode/plan.json");
   for (const l of formatPlan(plan)) deps.report(l);
   deps.report(`saved .tinycode/plan.json and .tinycode/PLAN.md (${plan.tasks.length} tasks, ${calls} call${calls === 1 ? "" : "s"})`);

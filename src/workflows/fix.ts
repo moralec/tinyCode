@@ -629,7 +629,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
   /** After a pass: the project's formatter/linter on the files the run changed; undone if the test then fails. */
   const lint = async (): Promise<void> => {
     await lintPass(
-      { cwd, files: changedSinceSnapshot(cwd, env), env },
+      { cwd, files: changedSinceSnapshot(cwd, env), env, trustRepo: true }, // /fix runs the project's tests
       { report: say, lint: deps.lint, verify: async () => (await runTest()).ok },
     );
   };

@@ -4,7 +4,7 @@
 
 <p align="center">A <a href="https://github.com/earendil-works/pi">Pi</a> extension that keeps the context small, so local models finish coding tasks in a 16k window where plain Pi runs out of room.</p>
 
-> **Preview — v1.0.1.** Works, but rough edges remain; see [Known issues](#known-issues-v101). Feedback welcome via GitHub issues.
+> **Preview — v1.0.4.** Works, but rough edges remain; see [Known issues](#known-issues-v104). Feedback welcome via GitHub issues.
 
 ## Why
 
@@ -198,7 +198,26 @@ the calls per step; `/dev on` turns on diagnostics (events, per-call tokens) and
 v1.1 aims at an 8k window (8 GB cards and laptops), v1.2 at bugs described in words, v1.3 at handing jobs to your local
 machine from another agent: [ROADMAP.md](ROADMAP.md).
 
-## Known issues (v1.0.1)
+## Security fixes (v1.0.4)
+
+A source-only security review found places where tinyCode trusted the project it works on more than it should. All of
+them are fixed in this release, each with a regression test:
+
+- Files tinyCode writes (`docs/overview.html`, `README.md`, `.tinycode/`, `/doc` edits, `.scpt` backups) no longer
+  follow a symlink committed in the project; a symlink there is refused.
+- Python syntax checks run isolated (`-I`), so a project file named after a standard module is never imported.
+- `/doc`'s "comments only" check no longer lets an f-string or code hidden in a JavaScript regex through.
+- Formatters run without a shell, so file names are never shell text. In workflows that run no project code (`/doc`,
+  `/edit` without a test) only ruff and black from your PATH run; the project's own tool binaries, prettier and eslint
+  run only where tinyCode already runs the project's tests.
+- `/test` no longer deletes an existing file when it undoes a failed attempt.
+- `/research` checks every redirect and where a name resolves before it fetches, so it cannot be bounced to your own
+  machine or network.
+
+Still good practice: treat an unfamiliar repository with the same care as running its tests, because `/fix` and `/test`
+do run them.
+
+## Known issues (v1.0.4)
 
 1. When both sides finish, tinyCode is often slower: its extra steps cost time on tasks that fit anyway.
 2. Runs vary: the same task can pass in 30 s or hit the 10-minute cap. Steadier runs are on the roadmap.

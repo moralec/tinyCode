@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tmpDir } from "./tmpdir.ts";
@@ -135,4 +135,24 @@ test("router: 'build a ... app' with no matching file routes to plan; with a mat
   assert.equal(heuristic("how do I build an app?", none).workflow, "ask");
   assert.equal(heuristic("fix the failing test", none).workflow, "fix");
   assert.ok(planMarkdown(good() as never).includes("# Plan"));
+});
+
+test("runPlan: a committed .tinycode/PLAN.md or .tinycode symlink is refused, never followed (security audit 2026-11-09)", async () => {
+  for (const kind of ["leaf", "dir"]) {
+    const root = tmp();
+    const d = join(root, "proj");
+    mkdirSync(d);
+    writeFileSync(join(root, "victim.txt"), "ORIGINAL");
+    if (kind === "leaf") {
+      mkdirSync(join(d, ".tinycode"));
+      symlinkSync(join(root, "victim.txt"), join(d, ".tinycode", "PLAN.md"));
+    } else {
+      mkdirSync(join(root, "outdir"));
+      symlinkSync(join(root, "outdir"), join(d, ".tinycode"));
+    }
+    const deps = { cwd: d, config: mergeConfig({}), chat: async () => reply(good(4)), report: () => {}, env: { TINYCODE_LOG: join(root, "calls.jsonl") } };
+    await assert.rejects(runPlan({ request: "a CLI habit tracker" }, deps), /symlink/);
+    assert.equal(readFileSync(join(root, "victim.txt"), "utf8"), "ORIGINAL");
+    assert.ok(!existsSync(join(root, "outdir", "plan.json")));
+  }
 });

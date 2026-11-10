@@ -300,6 +300,7 @@ test("tool set: the baseline minus workflow tools in a diet; restore_best only w
   assert.deepEqual(toolSet(all, { diet: false, best: true }).slice(-1), ["restore_best"]);
   assert.equal(toolSet(all, { diet: false, best: true }).filter((n) => n === "restore_best").length, 1);
   assert.deepEqual(toolSet(["read", "edit"], { diet: true, best: false }), ["read", "edit"], "a user's smaller baseline is never widened");
+  assert.deepEqual(toolSet(all, { diet: true, best: false, always: true }), toolSet(all, { diet: true, best: true }), "E12: the same list before and after a best");
   for (const t of LOOP_TOOLS) assert.ok(!(WORKFLOW_TOOLS as readonly string[]).includes(t));
   const d = new ToolDiet();
   assert.equal(d.enter(), true);
@@ -310,18 +311,20 @@ test("tool set: the baseline minus workflow tools in a diet; restore_best only w
 
 test("the extension: a workflow that did not finish puts the request on the loop tools until the next user message; the diet saves tool-definition characters", async () => {
   const cwd = repo();
-  const { handlers, tools, sets, active } = await load({ TINYCODE_CONFIG: join(cwd, "none.json"), TINYCODE_LOG: join(cwd, "calls.jsonl") });
+  // D6 on explicitly: the public release may ship it off until it is measured (scripts/export-release.sh)
+  writeFileSync(join(cwd, "d6.json"), JSON.stringify({ limits: { restoreToolAlways: true } }));
+  const { handlers, tools, sets, active } = await load({ TINYCODE_CONFIG: join(cwd, "d6.json"), TINYCODE_LOG: join(cwd, "calls.jsonl") });
   const ctx = { cwd, hasUI: false, model: { id: "gemma-4-12b", provider: "tinycode", api: "openai-completions" } };
   const run = (name: string, e: Record<string, unknown>) => (handlers.get(name) ?? []).map((h) => h(e, ctx));
   await run("before_agent_start", { prompt: "what is the difference between a list and a tuple?", systemPrompt: "B" })[0];
   const full = active();
-  assert.ok(full.includes("fix") && full.includes("find") && !full.includes("restore_best"), "all tools, no restore_best yet");
+  assert.ok(full.includes("fix") && full.includes("find") && full.includes("restore_best"), "all tools, restore_best from the start (E12)");
   // the first call of the request is a workflow tool that finished: no diet
   run("tool_result", { toolName: "explain", toolCallId: "a", input: {}, isError: false, content: [{ type: "text", text: "explained\nSTATUS: done. Report to user, stop." }] });
   assert.equal(active().length, full.length);
   // a workflow tool that failed: loop tools only
   run("tool_result", { toolName: "fix", toolCallId: "b", input: {}, isError: false, content: [{ type: "text", text: "fix failed\nSTATUS: failed \u2014 x; raw tools ok" }] });
-  assert.deepEqual(active(), ["read", "bash", "edit", "write", "find", "run_tests", "todo"]);
+  assert.deepEqual(active(), ["read", "bash", "edit", "write", "find", "run_tests", "todo", "restore_best"]);
   const sizeOf = (names: string[]) => names.reduce((n, name) => n + JSON.stringify(tools.get(name) ? { name, d: (tools.get(name) as { description?: string }).description, p: (tools.get(name) as { parameters?: unknown }).parameters } : { name }).length, 0);
   console.log(`registered tool definitions (tinyCode's own): ${sizeOf(full)} chars -> ${sizeOf(active())} chars in raw-tool work`);
   const nSets = sets.length;
@@ -332,7 +335,7 @@ test("the extension: a workflow that did not finish puts the request on the loop
   assert.deepEqual(active(), full);
   // and a raw edit of the model's own starts the diet too
   run("tool_call", { toolName: "edit", toolCallId: "d", input: { path: "a.py", edits: [] } });
-  assert.deepEqual(active(), ["read", "bash", "edit", "write", "find", "run_tests", "todo"]);
+  assert.deepEqual(active(), ["read", "bash", "edit", "write", "find", "run_tests", "todo", "restore_best"]);
 });
 
 test("the extension: the tool-set API missing (older Pi) leaves all tools and never throws", async () => {
@@ -358,21 +361,43 @@ test("the extension: the system prompt has no Pi docs block, carries the terse l
   assert.ok(r.systemPrompt.includes("<cwd>"));
 });
 
+test("the extension: with rewriteGuard (E1), a rewrite says what it threw away against the best tree; nothing lost keeps C21's line", async () => {
+  const cwd = repo();
+  writeFileSync(join(cwd, "cfg.json"), JSON.stringify({ test: { command: "cat out.txt; false" }, limits: { undoWorse: false, rewriteGuard: true } }));
+  const best = "class Game:\n    def roll(self, pins):\n        pass\n\ndef score(rolls):\n    return 0\n";
+  writeFileSync(join(cwd, "bowling.py"), best);
+  writeFileSync(join(cwd, "out.txt"), "FAILED t::a - x\n3 failed, 28 passed in 0.1s\n");
+  const { handlers, tools } = await load({ TINYCODE_CONFIG: join(cwd, "cfg.json"), TINYCODE_LOG: join(cwd, "calls.jsonl") });
+  const ctx = { cwd, hasUI: false };
+  const run = (name: string, e: Record<string, unknown>) => (handlers.get(name) ?? []).map((h) => h(e, ctx));
+  await run("before_agent_start", { prompt: "fix bowling", systemPrompt: "B" })[0];
+  await (tools.get("run_tests") as unknown as { execute: Exec }).execute("id", {}, undefined, undefined, ctx);
+  const write = (id: string, content: string) => {
+    run("tool_call", { toolName: "write", toolCallId: id, input: { path: "bowling.py", content } });
+    writeFileSync(join(cwd, "bowling.py"), content); // Pi's write runs between the two hooks
+    return (run("tool_result", { toolName: "write", toolCallId: id, input: { path: "bowling.py" }, isError: false, content: [{ type: "text", text: "Wrote" }] })[0] as { content: { text: string }[] }).content[0]!.text;
+  };
+  assert.equal(write("w1", "x = 1\n"), "Wrote\nWhole-file rewrite: cut bowling.py from 83 to 6 chars; dropped Game, score. Best tree 28/31 pass: restore_best puts it back.");
+  assert.equal(write("w2", best.replace("return 0", "return sum(rolls)")), "Wrote\nWhole-file rewrite. Prefer edit.", "nothing lost: C21's line");
+});
+
 test("the extension: run_tests keeps the best tree; a worse run says so and restore_best puts the better files back; a whole-file write over a file gets a nudge; a cut read ends with an explicit line", async () => {
   const cwd = repo();
   // undoWorse off: the model restores by itself here (the auto-undo default has its own test below)
-  writeFileSync(join(cwd, "cfg.json"), JSON.stringify({ test: { command: "cat out.txt; false" }, limits: { undoWorse: false } }));
+  writeFileSync(join(cwd, "cfg.json"), JSON.stringify({ test: { command: "cat out.txt; false" }, limits: { undoWorse: false, restoreToolAlways: true } }));
   writeFileSync(join(cwd, "bowling.py"), "v1\n");
   writeFileSync(join(cwd, "out.txt"), "FAILED t::a - x\n7 failed, 24 passed in 0.1s\n");
   const { handlers, tools, active } = await load({ TINYCODE_CONFIG: join(cwd, "cfg.json"), TINYCODE_LOG: join(cwd, "calls.jsonl") });
   const ctx = { cwd, hasUI: false };
   const run = (name: string, e: Record<string, unknown>) => (handlers.get(name) ?? []).map((h) => h(e, ctx));
   await run("before_agent_start", { prompt: "what is a tuple?", systemPrompt: "B" })[0];
-  assert.ok(!active().includes("restore_best"), "not declared before a best tree exists");
+  const before = active();
+  assert.ok(before.includes("restore_best"), "declared from the start (E12): the tool list never changes mid-run");
   const exec = (name: string, params: unknown = {}) => (tools.get(name) as unknown as { execute: Exec }).execute("id", params, undefined, undefined, ctx);
+  assert.equal((await exec("restore_best")).content[0]!.text, "No best tree yet.", "called early: says so, changes nothing");
   const first = await exec("run_tests");
   assert.ok(!first.content[0]!.text.includes("Worse than best"));
-  assert.ok(active().includes("restore_best"), "declared once a best exists");
+  assert.deepEqual(active(), before, "the first best does not change the tool list");
   writeFileSync(join(cwd, "bowling.py"), "v2 rewrite\n");
   writeFileSync(join(cwd, "out.txt"), "FAILED t::a - x\n28 failed, 3 passed in 0.1s\n");
   const worse = await exec("run_tests");
@@ -392,9 +417,23 @@ test("the extension: run_tests keeps the best tree; a worse run says so and rest
   assert.equal(cut.content[0]!.text, "line\n[lines 1-100 of 116; file continues: read offset=101]");
   // a new request forgets the best tree
   await run("before_agent_start", { prompt: "and another question about lists", systemPrompt: "B" })[0];
-  assert.ok(!active().includes("restore_best"));
+  assert.ok(active().includes("restore_best"));
   assert.equal((await exec("restore_best")).content[0]!.text, "No best tree yet.");
 });
+
+for (const cfg of [{ restoreToolAlways: false }, { loopBestTree: false }])
+  test(`the extension, ${JSON.stringify(cfg)}: restore_best is not declared before a best tree exists (E12 off)`, async () => {
+    const cwd = repo();
+    writeFileSync(join(cwd, "cfg.json"), JSON.stringify({ test: { command: "cat out.txt; false" }, limits: cfg }));
+    writeFileSync(join(cwd, "bowling.py"), "v1\n");
+    writeFileSync(join(cwd, "out.txt"), "FAILED t::a - x\n7 failed, 24 passed in 0.1s\n");
+    const { handlers, tools, active } = await load({ TINYCODE_CONFIG: join(cwd, "cfg.json"), TINYCODE_LOG: join(cwd, "calls.jsonl") });
+    const ctx = { cwd, hasUI: false };
+    await (handlers.get("before_agent_start") ?? [])[0]!({ prompt: "what is a tuple?", systemPrompt: "B" }, ctx);
+    assert.ok(!active().includes("restore_best"));
+    await (tools.get("run_tests") as unknown as { execute: Exec }).execute("id", {}, undefined, undefined, ctx);
+    assert.equal(active().includes("restore_best"), !("loopBestTree" in cfg), "after a best: offered only when the tree is kept");
+  });
 
 test("the extension, undoWorse: a worse run puts the best tree back at once (undoWorseFrom 1), the test file untouched; the same break a third time turns it off", async () => {
   const cwd = repo();
@@ -430,20 +469,28 @@ test("the extension, undoWorse: a worse run puts the best tree back at once (und
   assert.equal(readFileSync(join(cwd, "bowling.py"), "utf8"), "v2 broken\n");
 });
 
-test("the extension: heartbeats and stuck lines never reach the model's context; the hint stays", async () => {
-  const cwd = repo();
-  const { handlers } = await load({ TINYCODE_CONFIG: join(cwd, "none.json"), TINYCODE_LOG: join(cwd, "calls.jsonl") });
-  const ctx = { cwd, hasUI: false, model: { id: "gemma-4-12b", provider: "tinycode", api: "openai-completions" }, getSystemPrompt: () => "S" };
-  const t = (text: string) => [{ type: "text", text }];
-  const out = (handlers.get("context") ?? [])[0]!({ messages: [
-    { role: "user", content: t("fix it"), timestamp: 1 },
-    { role: "custom", customType: "tinycode-beat", content: "Still working on your request \u2014 4 steps so far.", display: true, timestamp: 2 },
-    { role: "custom", customType: "tinycode-hint", content: "tinyCode hint: use `fix`.", display: false, timestamp: 3 },
-  ] }, ctx) as { messages: { customType?: string; role: string; content: { text: string }[] }[] };
-  // the hint stays, merged into the user message before it (strict chat templates need alternating roles)
-  assert.deepEqual(out.messages.map((m) => m.customType ?? m.role), ["user"]);
-  assert.deepEqual(out.messages[0]!.content.map((p) => p.text), ["fix it\n\ntinyCode hint: use `fix`."]);
-});
+for (const [model, merged] of [["devstral-small-2-24b", true], ["gemma-4-12b", false]] as const)
+  test(`the extension: heartbeats and stuck lines never reach the model's context; the hint stays (${model})`, async () => {
+    const cwd = repo();
+    // D5's strict-template list explicitly: the public release may ship ["*"] until it is measured
+    writeFileSync(join(cwd, "d5.json"), JSON.stringify({ strictRoles: ["mistral", "devstral", "ministral", "magistral", "codestral"] }));
+    const { handlers } = await load({ TINYCODE_CONFIG: join(cwd, "d5.json"), TINYCODE_LOG: join(cwd, "calls.jsonl") });
+    const ctx = { cwd, hasUI: false, model: { id: model, provider: "tinycode", api: "openai-completions" }, getSystemPrompt: () => "S" };
+    const t = (text: string) => [{ type: "text", text }];
+    const out = (handlers.get("context") ?? [])[0]!({ messages: [
+      { role: "user", content: t("fix it"), timestamp: 1 },
+      { role: "custom", customType: "tinycode-beat", content: "Still working on your request \u2014 4 steps so far.", display: true, timestamp: 2 },
+      { role: "custom", customType: "tinycode-hint", content: "tinyCode hint: use `fix`.", display: false, timestamp: 3 },
+    ] }, ctx) as { messages: { customType?: string; role: string; content: string | { text: string }[] }[] };
+    if (merged) {
+      // a strict template (strictRoles): the hint is merged into the user message before it, roles alternate
+      assert.deepEqual(out.messages.map((m) => m.customType ?? m.role), ["user"]);
+      assert.deepEqual((out.messages[0]!.content as { text: string }[]).map((p) => p.text), ["fix it\n\ntinyCode hint: use `fix`."]);
+    } else {
+      // any other model (D5): the hint stays a message of its own, so the request before it is a cached prefix
+      assert.deepEqual(out.messages.map((m) => m.customType ?? m.role), ["user", "tinycode-hint"]);
+    }
+  });
 
 test("the extension, undoWorse default (undoWorseFrom 2): a first break gets the old line and is left for the model; the same break again is undone", async () => {
   const cwd = repo();

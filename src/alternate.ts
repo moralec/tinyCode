@@ -6,6 +6,8 @@
 //   - a user-role message straight after a tool result is folded into that tool result (the template wants an
 //     assistant turn there; the text is the same, only its place changes). Never across an assistant message.
 // Deterministic and idempotent: the same input gives the same output, so the cached prefix stays stable.
+// Only for the models in config `strictRoles` (needsAlternation): the fold moves the per-turn tail INTO the last tool
+// result, so the next turn edits that message, and hybrid models (Qwen3.5/3.6) then lose ~1.7k cached tokens per call.
 // Pi's internal roles that become `user` when sent (custom, bashExecution, branchSummary, compactionSummary) are
 // converted first by `convert` (Pi's convertToLlm), when one is given.
 
@@ -49,6 +51,12 @@ export interface AlternateResult<T> {
   merged: number;
   /** user messages folded into the tool result before them */
   folded: number;
+}
+
+/** True when `model`'s template wants strict alternation: an entry of `strictRoles` is a substring of the id (any case), or "*". */
+export function needsAlternation(model: string, strictRoles: readonly string[]): boolean {
+  const id = model.toLowerCase();
+  return strictRoles.some((p) => p === "*" || id.includes(p.toLowerCase()));
 }
 
 export function alternate<T extends AltMsg>(messages: T[], convert?: (ms: T[]) => T[]): AlternateResult<T> {

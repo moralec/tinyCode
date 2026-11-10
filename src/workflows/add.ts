@@ -297,7 +297,7 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
 
   pg.step("lint");
   await lintPass(
-    { cwd, files: changed(), env },
+    { cwd, files: changed(), env, trustRepo: true }, // /add runs the project's tests
     { report: say, lint: deps.lint, verify: async () => (await tests({ cwd, test: testToRun, config: cfg.test })).ok },
   );
   const files = changed();

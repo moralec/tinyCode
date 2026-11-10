@@ -59,12 +59,15 @@ export class BestTree {
   private undoOff = false;
   /** auto-restores made (this request) */
   undos = 0;
+  /** false (limits.loopBestTree): counts are still tracked (verdict, continue line, checkpoints), but no snapshot, line, restore or undo */
+  private keep: boolean;
   /** `undoFrom`: auto-undo from the Nth time the same break is seen (1 = at once; 2 lets a first break be fixed forward) */
-  constructor(stuckRuns = 0, maxContinues = 0, autoUndo = false, undoFrom = 1) {
+  constructor(stuckRuns = 0, maxContinues = 0, autoUndo = false, undoFrom = 1, keep = true) {
     this.stuckRuns = stuckRuns;
     this.maxContinues = maxContinues;
     this.autoUndo = autoUndo;
     this.undoFrom = Math.max(1, undoFrom);
+    this.keep = keep;
   }
 
   /**
@@ -103,9 +106,14 @@ export class BestTree {
     this.undos = 0;
   }
 
-  /** Is there a tree to go back to? */
+  /** Has a test run (or the hand-over) passed at least one test in this request? */
   get has(): boolean {
     return this.best !== null;
+  }
+
+  /** Is there a kept tree to go back to (`restore_best` offered)? */
+  get offersRestore(): boolean {
+    return this.keep && this.best !== null;
   }
 
   /** The hand-over's tree is the starting best (counts of the kept ladder tree, else of the original). `snapshot` copies the tree. */
@@ -116,7 +124,7 @@ export class BestTree {
     this.sinceBest = 0;
     this.breaks.clear();
     this.undoOff = false;
-    snapshot();
+    if (this.keep) snapshot();
   }
 
   /**
@@ -138,6 +146,7 @@ export class BestTree {
       this.verdict = worse ? "worse" : "same";
       if (counts.failed <= 0) return null;
       this.sinceBest++;
+      if (!this.keep) return null;
       if (restore && this.stuckRuns > 0 && this.sinceBest >= this.stuckRuns && !this.stuckSaid) {
         this.stuckSaid = true;
         if (!worse) return `No progress ${this.sinceBest} test runs (${fmt(counts)}). Stop: report what still fails.`;
@@ -156,7 +165,7 @@ export class BestTree {
     this.verdict = "best";
     this.breaks.clear();
     this.undoOff = false;
-    snapshot();
+    if (this.keep) snapshot();
     return null;
   }
 
@@ -184,7 +193,7 @@ export class BestTree {
    * a tree that no longer imported, below its best.
    */
   endRestore(restore: () => unknown | null): string | null {
-    if (!this.best || !this.last || !better(this.best, this.last)) return null;
+    if (!this.keep || !this.best || !this.last || !better(this.best, this.last)) return null;
     if (restore() === null) return null;
     this.last = this.best;
     return `Ended below best: restored best tree (${fmt(this.best)}).`;

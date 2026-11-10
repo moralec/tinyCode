@@ -6,7 +6,7 @@ import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig } from "../../src/config.ts";
 import { chat as realChat, type ChatResult, type Message } from "../../src/llm.ts";
 import { runPlan, unfamiliarLibrary, wantsResearch } from "../../src/workflows/plan.ts";
-import { formatResearch, htmlToText, parseResearchArgs, runResearch, urlAllowed } from "../../src/workflows/research.ts";
+import { fetchText, formatResearch, htmlToText, parseResearchArgs, privateAddress, runResearch, urlAllowed } from "../../src/workflows/research.ts";
 
 const TOKEN = "ghp_SECRETtoken1234567890";
 const tmp = () => tmpDir("tc-res-");
@@ -204,4 +204,26 @@ test("plan: one research call, its answer (only the answer) enters the plan prom
   assert.ok(r3.plan);
   assert.equal(r3.researched, false);
   assert.ok(lines.some((l) => /research skipped: offline/.test(l)));
+});
+
+test("urlAllowed/privateAddress: mapped, unspecified, link-local, trailing-dot and NAT64 forms are refused (security audit 2026-11-09)", () => {
+  for (const u of ["http://[::ffff:127.0.0.1]:9/", "http://[::ffff:7f00:1]/", "http://[::]/", "http://[fe81::1]/", "http://[fec0::1]/", "http://localhost./", "http://169.254.169.254/", "http://[64:ff9b::a9fe:a9fe]/", "http://[2002:7f00:1::]/", "http://198.18.0.1/", "http://0.0.0.0/"])
+    assert.equal(urlAllowed(u), false, u);
+  for (const u of ["https://github.com/a/b", "http://[2606:4700::1111]/", "https://8.8.8.8/"]) assert.equal(urlAllowed(u), true, u);
+  assert.equal(privateAddress("10.1.2.3"), true);
+  assert.equal(privateAddress("1.1.1.1"), false);
+  assert.equal(privateAddress("not an ip"), true);
+});
+
+test("fetchText: every redirect hop is checked; a public name that resolves privately is refused (security audit 2026-11-09)", async () => {
+  const hops = (to: string) => async (url: string) =>
+    url === "https://public.example/" ? { ok: false, status: 302, headers: { get: (h: string) => (h === "location" ? to : null) }, text: async () => "" } : { ok: true, status: 200, headers: { get: () => "text/plain" }, text: async () => `page ${url}` };
+  await assert.rejects(fetchText("https://public.example/", hops("http://127.0.0.1:8080/"), 200), /only public/);
+  await assert.rejects(fetchText("https://public.example/", hops("http://[::ffff:127.0.0.1]/x"), 200), /only public/);
+  assert.equal(await fetchText("https://public.example/", hops("/docs"), 200), "page https://public.example/docs");
+  const loop = async () => ({ ok: false, status: 301, headers: { get: () => "https://public.example/" }, text: async () => "" });
+  await assert.rejects(fetchText("https://public.example/", loop, 200), /redirects/);
+  const ok = async () => ({ ok: true, status: 200, headers: { get: () => "text/plain" }, text: async () => "fine" });
+  await assert.rejects(fetchText("https://rebind.example/", ok, 200, async () => ["127.0.0.1"]), /resolves to a private address/);
+  assert.equal(await fetchText("https://good.example/", ok, 200, async () => ["93.184.216.34"]), "fine");
 });

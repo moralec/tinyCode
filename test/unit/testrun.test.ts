@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { tmpDir } from "./tmpdir.ts";
 import { fileURLToPath } from "node:url";
-import { runTests, testCommand, trimTestOutput } from "../../src/testrun.ts";
+import { runTests, shellQuote, testCommand, trimTestOutput } from "../../src/testrun.ts";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const PY = (process.env.TINYCODE_TEST_PYTHON ?? "python3");
@@ -27,7 +27,16 @@ test("trimTestOutput: PASS line and FAIL block", () => {
 test("testCommand: config command wins; default is python -m pytest", () => {
   assert.equal(testCommand({ python: "python3", command: "npm test" }), "npm test");
   assert.equal(testCommand({ python: "python3", command: null }, "tests/t.py"), "python3 -m pytest -q -p no:cacheprovider tests/t.py");
-  assert.match(testCommand({ python: "C:\\Program Files\\Py\\python.exe", command: null }), /^"C:\\Program Files/);
+  assert.match(testCommand({ python: "C:\\Program Files\\Py\\python.exe", command: null }), process.platform === "win32" ? /^"C:\\Program Files/ : /^'C:\\Program Files/);
+});
+
+test("shellQuote: POSIX single quotes keep $(), backticks and ; as text; Windows double quotes (security audit 2026-11-09)", () => {
+  assert.equal(shellQuote("tests/test_a.py", false), "tests/test_a.py");
+  assert.equal(shellQuote("t.py;id", false), "'t.py;id'");
+  assert.equal(shellQuote("a$(id)`x`.py", false), "'a$(id)`x`.py'");
+  assert.equal(shellQuote("it's.py", false), "'it'\\''s.py'");
+  assert.equal(shellQuote("C:\\Program Files\\py.exe", true), '"C:\\Program Files\\py.exe"');
+  assert.equal(testCommand({ python: "python3", command: null }, "t.py;touch x"), "python3 -m pytest -q -p no:cacheprovider 't.py;touch x'");
 });
 
 test("runTests on r2-01: FAIL naming tests/test_task.py", { skip: !existsSync(R201) || !existsSync(PY) }, async () => {

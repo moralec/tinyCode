@@ -15,12 +15,13 @@ import { basename, dirname, extname, isAbsolute, join, normalize, posix, sep } f
 import type { Config } from "../config.ts";
 import { repoFiles } from "../context/outline.ts";
 import { trackedFiles } from "../context/evidence.ts";
+import { tmpdir } from "node:os";
 import { execShell, lintPass, type ExecFn, type LintOptions } from "../lint.ts";
 import type { Message } from "../llm.ts";
-import { applyBlocks } from "../protocol/apply.ts";
+import { applyBlocks, resolveBlockPath } from "../protocol/apply.ts";
 import { parseBlocks } from "../protocol/blocks.ts";
 import { EDIT_RULES, TESTS_RULE } from "../protocol/prompts.ts";
-import { runTests as realRunTests, testCommand, type TestRun } from "../testrun.ts";
+import { runTests as realRunTests, shellQuote, testCommand, type TestRun } from "../testrun.ts";
 import { isTestPath } from "./add.ts";
 import { isCachePath } from "./cachefiles.ts";
 import { viewText } from "./edit.ts";
@@ -144,7 +145,7 @@ export function detectFramework(cwd: string, target: string, files = repoFiles(c
   return null;
 }
 
-const q = (s: string) => (/[\s"&|<>^()]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
+const q = (s: string) => shellQuote(s);
 
 /** The command that runs one test file with the framework (a configured `test.command` wins, as in testrun.ts). */
 export function frameworkCommand(fw: Framework, cfg: Config["test"], testFile: string): string {
@@ -365,12 +366,14 @@ export async function runTestGen(args: TestGenArgs, deps: TestGenDeps): Promise<
   // ---- coverage (only when pytest-cov is already importable; nothing is installed)
   let covAvailable = false;
   if (fw.name === "pytest" && !cfg.test.command) {
-    covAvailable = (await exec(`${q(cfg.test.python)} -c "import pytest_cov"`, cwd)).code === 0;
+    // probed from the temp dir, so a project file named pytest_cov.py is not what answers (user site-packages still count)
+    covAvailable = (await exec(`${q(cfg.test.python)} -c "import pytest_cov"`, tmpdir(), [cfg.test.python, "-c", "import pytest_cov"])).code === 0;
   }
   const coverage = async (files: string[]): Promise<number | null> => {
     if (!covAvailable) return null;
-    const cmd = `${q(cfg.test.python)} -m pytest -q -p no:cacheprovider --cov=${q(dirname(target.file) === "." ? "." : dirname(target.file))} --cov-report=term ${files.map(q).join(" ")}`;
-    const r = await exec(cmd, cwd);
+    const covDir = dirname(target.file) === "." ? "." : dirname(target.file);
+    const argv = [cfg.test.python, "-m", "pytest", "-q", "-p", "no:cacheprovider", `--cov=${covDir}`, "--cov-report=term", ...files.map((f) => (f.startsWith("-") ? `./${f}` : f))];
+    const r = await exec(argv.map(q).join(" "), cwd, argv);
     const m = r.out.match(COV_LINE(target.file));
     return m ? Number(m[1]) : null;
   };
@@ -410,6 +413,12 @@ export async function runTestGen(args: TestGenArgs, deps: TestGenDeps): Promise<
     const f = testBlocksOnly(reply, target.file);
     if (f.refused.length) say(`refused (not a test file): ${JSON.stringify(f.refused)}`);
     for (const p of f.kept) if (!origs.has(p)) origs.set(p, readText(cwd, p));
+    // applyBlocks writes the resolved path (placeholder dropped, basename fallback): record that path's content too,
+    // or revert would take an existing file for a new one and delete it (security audit 2026-11-09)
+    for (const b of parseBlocks(f.reply)) {
+      const to = resolveBlockPath(cwd, b.path, b.search.trim() !== "");
+      if (!origs.has(to)) origs.set(to, readText(cwd, to));
+    }
     const r = await applyBlocks(f.reply, { cwd, protected: [], env });
     if (r.failed.length) say(`not applied: ${JSON.stringify(r.failed)}`);
     const bad = guardCode(cwd, codeBefore);
@@ -431,8 +440,9 @@ export async function runTestGen(args: TestGenArgs, deps: TestGenDeps): Promise<
   const revert = () => {
     for (const p of written) {
       const o = origs.get(p);
-      if (o === null || o === undefined) rmSync(join(cwd, p), { force: true });
-      else writeFileSync(join(cwd, p), o);
+      if (o === null) rmSync(join(cwd, p), { force: true });
+      else if (o !== undefined) writeFileSync(join(cwd, p), o);
+      else say(`kept ${p}: no record of its content before this run, so it is not deleted`);
     }
     written.clear();
   };
@@ -523,7 +533,7 @@ export async function runTestGen(args: TestGenArgs, deps: TestGenDeps): Promise<
 
   pg.step("lint");
   await lintPass(
-    { cwd, files: [...written], env },
+    { cwd, files: [...written], env, trustRepo: true }, // /test runs the project's tests
     { report: say, lint: deps.lint, verify: async () => (await runIt()).ok || onlyOld },
   );
   let cov: [number, number] | null = null;

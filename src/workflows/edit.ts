@@ -219,7 +219,7 @@ export async function runEdit(args: EditArgs, deps: EditDeps): Promise<EditResul
             if (routine.name !== "scpt") {
               pg.step("lint");
               await lintPass(
-                { cwd, files: [abs], env: deps.env },
+                { cwd, files: [abs], env: deps.env, trustRepo: !!checkOpts.test }, // project code runs only with a test
                 {
                   report: say,
                   lint: deps.lint,

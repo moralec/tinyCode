@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { alternate, checkAlternation, type AltMsg } from "../../src/alternate.ts";
+import { alternate, checkAlternation, needsAlternation, type AltMsg } from "../../src/alternate.ts";
+import { DEFAULTS } from "../../src/config.ts";
 
 const u = (text: string): AltMsg => ({ role: "user", content: [{ type: "text", text }] });
 const a = (text = "", calls = false): AltMsg => ({ role: "assistant", content: [{ type: "text", text }], ...(calls ? { tool_calls: [1] } : {}) });
@@ -96,3 +97,23 @@ for (const n of ["004", "005", "006"]) {
     assert.match(String(last.content), /\[note findings in todo\]/);
   });
 }
+
+test("needsAlternation: a strictRoles entry inside the model id, any case; \"*\" is every model; [] none", () => {
+  const strict = ["mistral", "devstral", "ministral", "magistral", "codestral"];
+  assert.equal(needsAlternation("devstral-small-2-24b", strict), true);
+  assert.equal(needsAlternation("Mistral-Small-3.2", strict), true);
+  for (const id of ["qwen3.6-35b-a3b", "gemma-4-12b", "qwen3-coder-30b-a3b", ""]) assert.equal(needsAlternation(id, strict), false, id);
+  assert.equal(needsAlternation("qwen3.6-35b-a3b", ["*"]), true);
+  assert.equal(needsAlternation("devstral-small-2-24b", []), false);
+});
+
+test("D5: without the fold, turn N minus its tail is a prefix of turn N+1; the fold edits the last tool result instead", () => {
+  const tail = u("[todo]\n1. [ ] fix it");
+  const turnN = [s, u("task"), a("", true), t("result 1"), tail];
+  const turnN1 = [s, u("task"), a("", true), t("result 1"), a("", true), t("result 2"), tail];
+  const prefixKept = (x: AltMsg[], y: AltMsg[]) => x.slice(0, -1).every((m, i) => JSON.stringify(m) === JSON.stringify(y[i]));
+  assert.ok(prefixKept(turnN, turnN1), "plain: only the tail changes, at a message boundary");
+  const f = (ms: AltMsg[]) => alternate(ms).messages;
+  assert.equal(f(turnN).length, 4, "folded: the tail is inside result 1");
+  assert.notEqual(JSON.stringify(f(turnN)[3]), JSON.stringify(f(turnN1)[3]), "folded: result 1 differs between the turns");
+});

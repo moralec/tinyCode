@@ -24,6 +24,7 @@ import { langOf, listSymbols, sameCode, type Lang, type Sym } from "../context/s
 import { lintPass, type LintOptions } from "../lint.ts";
 import type { Message } from "../llm.ts";
 import { applyEdit } from "../protocol/apply.ts";
+import { checkInside, writeInside } from "../safewrite.ts";
 import { cleanPath, normalizeEol, parseBlocks } from "../protocol/blocks.ts";
 import { trackedFiles } from "../context/evidence.ts";
 import { findTarget } from "./explain.ts";
@@ -157,9 +158,11 @@ export function makeCompile(python: string): CompileFn {
         return r.status === 0 ? { ok: true, message: "" } : { ok: false, message: `${r.stderr || r.stdout}`.trim().split("\n").slice(-6).join("\n") };
       };
       if (lang === "py") {
-        const f = join(dir, basename(path));
+        // a fixed file name and -I (no cwd on sys.path, no PYTHON* env): a repository file named py_compile.py, enum.py
+        // and so on is only compiled here, never imported (security audit 2026-11-09)
+        const f = join(dir, "check.py");
         writeFileSync(f, text);
-        return verdict(run(python, ["-c", "import sys,py_compile; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)", f, join(dir, "out.pyc")]));
+        return verdict(run(python, ["-I", "-c", "import sys,py_compile; py_compile.compile(sys.argv[1], cfile=sys.argv[2], dfile=sys.argv[3], doraise=True)", f, join(dir, "out.pyc"), basename(path)]));
       }
       const ext = extname(path).toLowerCase();
       if (ext === ".ts" || ext === ".mts" || ext === ".cts") {
@@ -394,10 +397,11 @@ export async function runDocComments(args: DocArgs, deps: DocDeps): Promise<DocR
   }
   let raw: string;
   try {
-    if (statSync(join(cwd, file)).size > 400_000) throw new Error("too big");
+    // checkInside: a tracked symlink to a file outside the project is refused (src/safewrite.ts)
+    if (statSync(checkInside(cwd, file)).size > 400_000) throw new Error("too big");
     raw = readFileSync(join(cwd, file), "utf8");
   } catch {
-    say(`/doc: cannot read ${file} (missing, binary or over 400k)`);
+    say(`/doc: cannot read ${file} (missing, binary, a symlink or over 400k)`);
     return res(false, "unreadable", file);
   }
   const eol = raw.includes("\r\n") ? "\r\n" : "\n";
@@ -472,9 +476,8 @@ export async function runDocComments(args: DocArgs, deps: DocDeps): Promise<DocR
   }
   say(c.skipped ? `compile check skipped (${c.message})` : `compile check: ok (${lang === "py" ? "py_compile" : "node --check"})`);
   pg.step("write");
-  const abs = join(cwd, file);
   pg.touch(file);
-  writeFileSync(abs, eol === "\r\n" ? cur.replace(/\n/g, "\r\n") : cur);
+  const abs = writeInside(cwd, file, eol === "\r\n" ? cur.replace(/\n/g, "\r\n") : cur);
   await lintPass(
     { cwd, files: [file], env: deps.env },
     { report: say, lint: deps.lint, verify: async () => (await compile(lang, file, normalizeEol(readFileSync(abs, "utf8")))).ok },

@@ -35,7 +35,12 @@ export const scptRoutine: Routine = {
       await writeFile(src, text);
       const r = await run("osacompile", ["-o", out, src]);
       if (r.code !== 0) throw new RoutineError(`osacompile failed:\n${r.out}`);
-      if (opts?.backup !== false) await copyFile(path, path + ".bak");
+      if (opts?.backup !== false) {
+        // copy into the fresh temp dir, then rename over <file>.bak: a .bak symlink is replaced, never followed
+        const bak = join(dir, "orig.bak");
+        await copyFile(path, bak);
+        await rename(bak, path + ".bak");
+      }
       await rename(out, path);
     } finally {
       await rm(dir, { recursive: true, force: true });

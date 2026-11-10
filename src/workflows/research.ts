@@ -4,6 +4,8 @@
 // back to the conversation (or into /plan's prompt); search output never does. Pure TypeScript `fetch`, no Unix
 // tools, no Pi import: the local `find` is injected (extensions/tinycode/index.ts wires src/branch.ts findAnswer).
 // GITHUB_TOKEN is read from the environment, sent only to api.github.com, and never logged or echoed.
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { NOOP_PROGRESS, type Progress } from "../progress.ts";
 import type { Config } from "../config.ts";
 import type { Message } from "../llm.ts";
@@ -43,7 +45,7 @@ export function parseResearchArgs(raw: string): ResearchArgs {
   return { question: raw.trim() };
 }
 
-type FetchLike = (url: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => Promise<{
+type FetchLike = (url: string, init?: { headers?: Record<string, string>; signal?: AbortSignal; redirect?: "manual" }) => Promise<{
   ok: boolean;
   status: number;
   headers?: { get(name: string): string | null };
@@ -59,6 +61,8 @@ export interface ResearchDeps {
   chat: ChatFn;
   /** injectable for tests; default is the global fetch */
   fetch?: FetchLike;
+  /** host name -> addresses, checked before each fetch hop; default: DNS with the global fetch, none with an injected one */
+  lookup?: LookupFn | null;
   /** the local `find` branch (src/branch.ts findAnswer); absent = the tool answers "not available" */
   find?: (question: string) => Promise<string>;
   report?: (line: string) => void;
@@ -98,7 +102,45 @@ export function htmlToText(html: string): string {
     .trim();
 }
 
-/** Only public http(s) pages: no other scheme, no localhost or private-network addresses. */
+/** The 8 groups of an IPv6 address (an IPv4 tail folded in), or null. */
+function v6Groups(ip: string): number[] | null {
+  let s = ip.toLowerCase().split("%")[0]!;
+  const tail = s.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (tail) {
+    const [a, b, c, d] = tail.slice(1).map(Number) as [number, number, number, number];
+    s = s.slice(0, -tail[0].length) + ((a << 8) | b).toString(16) + ":" + ((c << 8) | d).toString(16);
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const rest = halves.length === 2 ? (halves[1] ? halves[1].split(":") : []) : null;
+  const parts = rest === null ? head : [...head, ...Array(Math.max(0, 8 - head.length - rest.length)).fill("0"), ...rest];
+  return parts.length === 8 ? parts.map((x) => parseInt(x || "0", 16)) : null;
+}
+
+/**
+ * True for an address off the public internet: loopback, private, link-local, CGNAT, benchmarking, unspecified,
+ * multicast and reserved, and the IPv4-mapped, NAT64 and 6to4 forms of those. Anything unparsable counts as private.
+ */
+export function privateAddress(ip: string): boolean {
+  const v = isIP(ip);
+  if (v === 4) {
+    const [a, b] = ip.split(".").map(Number) as [number, number];
+    return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 168 || b === 0)) || (a === 100 && b >= 64 && b <= 127) || (a === 198 && (b === 18 || b === 19));
+  }
+  if (v !== 6) return true;
+  const g = v6Groups(ip);
+  if (!g) return true;
+  const v4 = (hi: number, lo: number) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return privateAddress(v4(g[6]!, g[7]!)); // ::ffff:a.b.c.d
+  if (g.slice(0, 6).every((x) => x === 0)) return true; // ::, ::1, IPv4-compatible
+  if (g[0] === 0x64 && g[1] === 0xff9b) return privateAddress(v4(g[6]!, g[7]!)); // NAT64
+  if (g[0] === 0x2002) return privateAddress(v4(g[1]!, g[2]!)); // 6to4
+  const top = g[0]!;
+  return (top & 0xfe00) === 0xfc00 || (top & 0xffc0) === 0xfe80 || (top & 0xffc0) === 0xfec0 || (top & 0xff00) === 0xff00;
+}
+
+/** Only public http(s) pages: no other scheme, no localhost or private-network names or addresses (any written form). */
 export function urlAllowed(raw: string): boolean {
   let u: URL;
   try {
@@ -107,16 +149,14 @@ export function urlAllowed(raw: string): boolean {
     return false;
   }
   if (u.protocol !== "https:" && u.protocol !== "http:") return false;
-  const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal") || h === "::1") return false;
-  const m = h.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
-  if (m) {
-    const a = Number(m[1]);
-    const b = Number(m[2]);
-    if (a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127)) return false;
-  }
-  return !/^(fc|fd|fe80)/.test(h) || !h.includes(":");
+  const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!h || h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".home.arpa")) return false;
+  return isIP(h) ? !privateAddress(h) : true;
 }
+
+export type LookupFn = (host: string) => Promise<string[]>;
+/** Every address a name resolves to (A and AAAA). */
+export const dnsAddresses: LookupFn = async (host) => (await dnsLookup(host, { all: true, verbatim: true })).map((a) => a.address);
 
 function cap(text: string, chars: number): string {
   return text.length > chars ? text.slice(0, chars) + `\n[cut at ${chars} characters]` : text;
@@ -155,10 +195,30 @@ export async function githubCode(query: string, f: FetchLike, env: Record<string
   return items.map((r) => `${r.repository?.full_name}: ${r.path} ${r.html_url}`).join("\n");
 }
 
-/** Fetch a URL as readable text. The token is never sent here (only to api.github.com). */
-export async function fetchText(url: string, f: FetchLike, chars: number): Promise<string> {
-  if (!urlAllowed(url)) throw new Error("only public http(s) URLs can be fetched");
-  const res = await f(url, { headers: { "User-Agent": "tinycode", Accept: "text/html,text/plain,text/markdown,*/*;q=0.5" }, signal: AbortSignal.timeout(15_000) });
+const MAX_REDIRECTS = 4;
+
+/**
+ * Fetch a URL as readable text. The token is never sent here (only to api.github.com). Redirects are followed by hand,
+ * so every hop passes urlAllowed and, with `lookup`, a resolved-address check (security audit 2026-11-09). Residual:
+ * the name is resolved again by fetch itself, so a DNS answer that changes between the two (rebinding) is not caught.
+ */
+export async function fetchText(url: string, f: FetchLike, chars: number, lookup: LookupFn | null = null): Promise<string> {
+  let cur = url;
+  let res: Awaited<ReturnType<FetchLike>>;
+  for (let hop = 0; ; hop++) {
+    if (!urlAllowed(cur)) throw new Error("only public http(s) URLs can be fetched");
+    const host = new URL(cur).hostname.replace(/^\[|\]$/g, "");
+    if (lookup && !isIP(host)) {
+      const addrs = await lookup(host);
+      if (!addrs.length || addrs.some(privateAddress)) throw new Error("only public http(s) URLs can be fetched (the name resolves to a private address)");
+    }
+    res = await f(cur, { headers: { "User-Agent": "tinycode", Accept: "text/html,text/plain,text/markdown,*/*;q=0.5" }, signal: AbortSignal.timeout(15_000), redirect: "manual" });
+    if (res.status < 300 || res.status >= 400) break;
+    const loc = res.headers?.get("location");
+    if (!loc) throw new Error(`HTTP ${res.status} without a location`);
+    if (hop >= MAX_REDIRECTS) throw new Error(`more than ${MAX_REDIRECTS} redirects`);
+    cur = new URL(loc, cur).toString();
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const type = res.headers?.get("content-type") ?? "";
   const body = (await res.text()).slice(0, chars * 8);
@@ -174,6 +234,7 @@ export async function runResearch(args: ResearchArgs, deps: ResearchDeps): Promi
   const env = deps.env ?? process.env;
   const rc = deps.config.research;
   const f = deps.fetch ?? (globalThis.fetch as unknown as FetchLike);
+  const lookup = deps.lookup !== undefined ? deps.lookup : deps.fetch ? null : dnsAddresses;
   const report = deps.report ?? (() => {});
   const pg = deps.progress ?? NOOP_PROGRESS;
   const trace: string[] = [];
@@ -240,7 +301,7 @@ export async function runResearch(args: ResearchArgs, deps: ResearchDeps): Promi
         if (tool === "github_repos") obs = await githubRepos(arg, f, env);
         else if (tool === "github_code") obs = await githubCode(arg, f, env);
         else if (tool === "fetch") {
-          obs = await fetchText(arg, f, rc.resultChars);
+          obs = await fetchText(arg, f, rc.resultChars, lookup);
           seen.add(cleanUrl(arg));
         } else obs = deps.find ? await deps.find(arg) : "find is not available here";
       } catch (e) {

@@ -7,7 +7,7 @@ import { createLimits, readCutMarker, sizeTokens, toolCallVerdict, usableTokens,
 import { buildNote, Checkpointer, milestoneOf, requestStart, requestText, touchedFiles } from "../../src/checkpoint.ts";
 import { parseCounts } from "../../src/testrun.ts";
 import { existsSync, readFileSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { formatStats, logCall, logToolsFirst, readCalls } from "../../src/log.ts";
 import { makeIndexCache, route, type Routed } from "../../src/router.ts";
 import { agreement, asToolTurn, choose, DoneGuard, dropDisplayOnly, formatOrchestration, logDecision, logDirect, rateFor, readDecisions, readLog, resultMessage, runDirect, scopeAfter, scopeBefore, targetOf, type DirectCall } from "../../src/orchestrate.ts";
@@ -22,7 +22,7 @@ import { BUILD_PHASES, parseBuildArgs, runBuild } from "../../src/workflows/buil
 import { Compactor } from "../../src/compact.ts";
 import { loadPrepareCompaction, runPiCompact } from "../../src/picompact.ts";
 import { compact as piCompact, convertToLlm } from "@earendil-works/pi-coding-agent";
-import { alternate } from "../../src/alternate.ts";
+import { alternate, needsAlternation } from "../../src/alternate.ts";
 import { wrongPathHint } from "../../src/pathhint.ts";
 import { forgiveEditCall, type ForgiveCall } from "../../src/forgive.ts";
 import { ADD_PHASES, parseAddArgs, runAdd } from "../../src/workflows/add.ts";
@@ -36,7 +36,8 @@ import { EDIT_PHASES, parseEditArgs, runEdit } from "../../src/workflows/edit.ts
 import { PLAN_PHASES, parsePlanArgs, runPlan } from "../../src/workflows/plan.ts";
 import { formatResearch, parseResearchArgs, RESEARCH_PHASES, runResearch } from "../../src/workflows/research.ts";
 import { parseReviewArgs, REVIEW_PHASES, runReview } from "../../src/workflows/review.ts";
-import { FIX_PHASES, handoverText, isTestPath, parseFixArgs, restoreSnapshot, runFix, takeSnapshot, treeHash, undoFix, type PiHandoff } from "../../src/workflows/fix.ts";
+import { FIX_PHASES, handoverText, isTestPath, parseFixArgs, restoreSnapshot, runFix, takeSnapshot, treeHash, undoDir, undoFix, type PiHandoff } from "../../src/workflows/fix.ts";
+import { guardLine, pyParseError, rewriteFindings } from "../../src/rewriteguard.ts";
 
 export default function (pi: ExtensionAPI) {
   let cfg: Config;
@@ -75,7 +76,7 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  const tm = toolManager(pi, cfg.limits.stuckTestRuns, cfg.limits.autoContinue, cfg.limits.undoWorse, cfg.limits.undoWorseFrom);
+  const tm = toolManager(pi, cfg.limits.stuckTestRuns, cfg.limits.autoContinue, cfg.limits.undoWorse, cfg.limits.undoWorseFrom, cfg.limits.loopBestTree, cfg.limits.restoreToolAlways);
   registerBranchTools(pi, cfg, {
     tree: tm.best,
     snapshot: (cwd) => void takeSnapshot(cwd, process.env, LOOP_SLOT),
@@ -142,17 +143,18 @@ function registerDev(pi: ExtensionAPI): void {
 
 /**
  * Which tools the model sees (src/tools.ts `toolSet`): Pi's active set at the start of the request, cut to the loop tools
- * once the request is in raw-tool work (the diet), plus `restore_best` once a best tree exists. Every call is safe: an
+ * once the request is in raw-tool work (the diet), plus `restore_best` once a best tree exists (from the start with
+ * limits.restoreToolAlways, E12: the tool list then never changes mid-run). Every call is safe: an
  * older Pi without the tool-set API simply keeps all tools.
  */
-function toolManager(pi: ExtensionAPI, stuckTestRuns: number, autoContinue: number, undoWorse = false, undoWorseFrom = 1) {
-  const best = new BestTree(stuckTestRuns, autoContinue, undoWorse, undoWorseFrom);
+function toolManager(pi: ExtensionAPI, stuckTestRuns: number, autoContinue: number, undoWorse = false, undoWorseFrom = 1, keepBest = true, restoreAlways = false) {
+  const best = new BestTree(stuckTestRuns, autoContinue, undoWorse, undoWorseFrom, keepBest);
   const diet = new ToolDiet();
   let baseline: string[] | null = null;
   const sync = (): void => {
     try {
       if (!baseline) return;
-      const want = toolSet(baseline, { diet: diet.on, best: best.has });
+      const want = toolSet(baseline, { diet: diet.on, best: best.offersRestore, always: keepBest && restoreAlways });
       const cur = pi.getActiveTools();
       if (want.length !== cur.length || want.some((n, i) => n !== cur[i])) pi.setActiveTools(want);
     } catch {
@@ -210,7 +212,8 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     },
   };
   const wholeReads = new Set<string>();
-  const rewrites = new Set<string>();
+  /** whole-file rewrites once tests pass (C21): tool call id -> the file's absolute path, for the rewrite guard (E1) */
+  const rewrites = new Map<string, string>();
 
   // Plain chat gets the same progress as a workflow (status line, checklist from the model's todo, calls, tokens, cache %).
   // Inside a workflow's rung 3 the workflow's own progress is live: the loop feeds its todo and its calls into that one.
@@ -427,7 +430,7 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     if (!insideWorkflow() && entersRawWork({ call: e.toolName })) tm.enterRaw();
     if (e.toolName === "write") {
       const target = resolve(ctx.cwd, String((e.input as Record<string, unknown>).path ?? (e.input as Record<string, unknown>).file_path ?? ""));
-      if (rewriteNudge("write", existsSync(target), tm.best.has)) rewrites.add(e.toolCallId);
+      if (cfg.limits.rewriteNudge && rewriteNudge("write", existsSync(target), tm.best.has)) rewrites.set(e.toolCallId, target);
     }
     const v = toolCallVerdict(lim, cfg.limits, e.toolName, e.input as Record<string, unknown>, {
       resolvePath: (p) => resolve(ctx.cwd, p),
@@ -449,6 +452,23 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     if (v.action === "allow" && v.whole) wholeReads.add(e.toolCallId);
     return v.action === "allow" ? undefined : { block: true, reason: v.reason };
   });
+
+  // the rewrite guard (E1): what a rewrite threw away against the file's copy in the loop's best tree; null = none found
+  const guardFor = (cwd: string, file: string): string | null => {
+    if (!tm.best.offersRestore) return null;
+    const rel = relative(cwd, file);
+    let before: string, after: string;
+    try {
+      before = readFileSync(join(undoDir(cwd, process.env, LOOP_SLOT), "files", rel), "utf8");
+      after = readFileSync(file, "utf8");
+    } catch {
+      return null; // not in the snapshot (too big, or new since): C21's line
+    }
+    const findings = rewriteFindings(rel, before, after);
+    const parse = pyParseError(cfg.test.python, file);
+    if (parse) findings.push(`${rel} ${parse}`);
+    return guardLine(findings, tm.best.best, true);
+  };
 
   pi.on("tool_result", (e, ctx) => {
     // forgiving edits (src/forgive.ts): a failed Pi edit with a whitespace-only miss is applied here, a duplicate is located
@@ -491,8 +511,9 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
       changed = true;
     }
     // a whole-file rewrite once tests pass: a nudge, never a block
-    if (rewrites.delete(e.toolCallId) && !isError) {
-      text += `\n${rewriteNudge("write", true, true)}`;
+    const rewritten = rewrites.get(e.toolCallId);
+    if (rewritten !== undefined && rewrites.delete(e.toolCallId) && !isError) {
+      text += `\n${(cfg.limits.rewriteGuard && guardFor(ctx.cwd, rewritten)) || rewriteNudge("write", true, true)}`;
       changed = true;
     }
     const capped = wholeReads.delete(e.toolCallId) ? null : lim.cap(text);
@@ -620,7 +641,9 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     // S4b: the todo and notes go last, as a user message (tail only: the prefix and the cache stay as they were).
     const out = withTail(masked ?? (messages as never), lim.todo, lim.outputLimitHit, lim.tailNotes.splice(0), nudgeTodo) ?? masked ?? (checked || folded || turned ? (messages as never) : undefined);
     // last of all (src/alternate.ts): strict chat templates (Mistral) need user/assistant to alternate, so adjacent
-    // user-role messages become one and a user message right after tool results is folded into the last result
+    // user-role messages become one and a user message right after tool results is folded into the last result.
+    // Only for those models (cfg.strictRoles): elsewhere the tail stays its own message, so the cached prefix holds.
+    if (!needsAlternation(modelId(ctx), cfg.strictRoles)) return out ? { messages: out as never } : undefined;
     const sent = (out ?? e.messages) as never as Parameters<typeof alternate>[0];
     const alt = alternate(sent, (ms) => convertToLlm(ms as never) as never);
     if (alt.merged + alt.folded > 0) return { messages: alt.messages as never };

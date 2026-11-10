@@ -70,3 +70,12 @@ test("lane temperature (0-2) and seed (integer) are validated", () => {
   assert.throws(() => mergeConfig(lane({ temperature: "hot" })), /lanes\.trunk\.temperature/);
   assert.throws(() => mergeConfig(lane({ seed: 1.5 })), /lanes\.trunk\.seed/);
 });
+
+test("strictRoles (C20, D5): Mistral-family ids by default; a list of non-empty strings, else refused", () => {
+  assert.deepEqual(mergeConfig({}).strictRoles, DEFAULTS.strictRoles);
+  assert.deepEqual(DEFAULTS.strictRoles, ["*"]); // public v1.0.4: D5 off until measured
+  assert.deepEqual(mergeConfig({ strictRoles: [] }).strictRoles, []);
+  assert.deepEqual(mergeConfig({ strictRoles: ["*"] }).strictRoles, ["*"]);
+  for (const bad of ["mistral", [""], [3]])
+    assert.throws(() => mergeConfig({ strictRoles: bad }), (e: Error) => e instanceof ConfigError && e.message.includes("strictRoles"));
+});

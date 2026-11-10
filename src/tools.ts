@@ -262,14 +262,14 @@ export class ToolDiet {
 
 /**
  * The tools to declare to the model: the baseline (what Pi had active, without `restore_best`), cut to the loop tools
- * in a diet, plus `restore_best` once a best tree exists. The order of the baseline is kept, so a repeated call with the
+ * in a diet, plus `restore_best` once a best tree exists, or from the start with `always` (E12). The order of the baseline is kept, so a repeated call with the
  * same arguments gives the same list.
  */
-export function toolSet(baseline: string[], o: { diet: boolean; best: boolean }): string[] {
+export function toolSet(baseline: string[], o: { diet: boolean; best: boolean; always?: boolean }): string[] {
   const loop = LOOP_TOOLS as readonly string[];
   // MCP tools (mcp__<server>__<tool>) are the user's own, not tinyCode workflows: the diet keeps them (web_fetch, ...)
   const base = baseline.filter((n) => n !== RESTORE_TOOL && (!o.diet || loop.includes(n) || n.startsWith("mcp__")));
-  return o.best ? [...base, RESTORE_TOOL] : base;
+  return o.best || o.always ? [...base, RESTORE_TOOL] : base;
 }
 
 // ---------------------------------------------------------------- the tools-first nudge (rule 14: a nudge, never a block)

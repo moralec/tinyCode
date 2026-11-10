@@ -3,7 +3,7 @@
 // fallback lane. A wrong answer is never retried here. Every attempt appends a line to the call log.
 import { loadConfig, type Config, type Lane } from "./config.ts";
 import { logCall } from "./log.ts";
-import { alternate, type AltMsg } from "./alternate.ts";
+import { alternate, needsAlternation, type AltMsg } from "./alternate.ts";
 
 export interface Message {
   role: "system" | "user" | "assistant";
@@ -176,17 +176,18 @@ async function attempt(
 }
 
 export async function chat(step: string, messages: Message[], opts: ChatOptions = {}): Promise<ChatResult> {
-  messages = alternate(messages as never as AltMsg[]).messages as never as Message[]; // strict templates: user runs merge
   const cfg = opts.config ?? loadConfig(opts.env ?? process.env);
   const st = cfg.steps[step as keyof Config["steps"]];
   if (!st) throw new LlmError(`unknown step ${JSON.stringify(step)}`, "CONFIG");
   const lane = cfg.lanes[st.lane];
   if (!lane) throw new LlmError(`step ${step}: lane "${st.lane}" is not configured`, "CONFIG");
-  const first = await attempt(step, st.lane, lane, messages, opts, cfg, false);
+  // strict templates (cfg.strictRoles): user runs merge; decided per lane, the fallback may be another model
+  const forLane = (l: Lane): Message[] => (needsAlternation(l.model, cfg.strictRoles) ? (alternate(messages as never as AltMsg[]).messages as never as Message[]) : messages);
+  const first = await attempt(step, st.lane, lane, forLane(lane), opts, cfg, false);
   if (first.result) return first.result;
   const fb = st.fallback ? cfg.lanes[st.fallback] : null;
   if (!st.fallback || !fb) throw first.transportFailure as LlmError;
-  const second = await attempt(step, st.fallback, fb, messages, opts, cfg, true);
+  const second = await attempt(step, st.fallback, fb, forLane(fb), opts, cfg, true);
   if (second.result) return second.result;
   throw new LlmError(
     `${(first.transportFailure as LlmError).message}; fallback ${(second.transportFailure as LlmError).message}`,

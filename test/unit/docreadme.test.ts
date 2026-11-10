@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tmpDir } from "./tmpdir.ts";
@@ -625,4 +625,18 @@ test("claim helpers: pure additions are not checked; identifiers, file lines and
   assert.equal(validEvidence("embedder.py:1-2", src.shown), "embedder.py:1");
   assert.equal(validEvidence("embedder.py:7", src.shown), null);
   assert.equal(validEvidence("other.py:1", src.shown), null);
+});
+
+test("/doc readme: a committed docs/overview.html symlink is refused, and a symlinked README is not taken as the README (security audit 2026-11-09)", async () => {
+  const { cwd, env } = project(FILES);
+  const victim = join(cwd, "..", `victim-${Date.now()}.txt`);
+  writeFileSync(victim, "ORIGINAL");
+  mkdirSync(join(cwd, "docs"), { recursive: true });
+  symlinkSync(victim, join(cwd, "docs", "overview.html"));
+  const f = fake((kind, user) => standard(kind, user));
+  await assert.rejects(run(cwd, env, f.chat, "readme"), /symlink/);
+  assert.equal(readFileSync(victim, "utf8"), "ORIGINAL");
+  const d = tmpDir("tinycode-readme-link-");
+  symlinkSync(victim, join(d, "README.md"));
+  assert.equal(findReadme(d), null);
 });

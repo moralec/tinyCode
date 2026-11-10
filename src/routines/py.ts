@@ -17,11 +17,10 @@ export const pyRoutine: Routine = {
     await atomicWrite(path, text);
   },
   async check(path, o) {
-    // py_compile writes a .pyc; send it to the temp dir so the project tree stays clean
-    const r = await run(o.python, ["-m", "py_compile", path], {
-      cwd: o.cwd,
-      env: { PYTHONPYCACHEPREFIX: join(tmpdir(), "tinycode-pyc") },
-    });
+    // py_compile writes a .pyc; send it to the temp dir so the project tree stays clean.
+    // -I: the project directory is not on sys.path, so a repository py_compile.py is never imported (audit 2026-11-09).
+    // -I also ignores PYTHON* variables, so the cache prefix goes as -X (Python 3.8+), not PYTHONPYCACHEPREFIX.
+    const r = await run(o.python, ["-I", "-X", `pycache_prefix=${join(tmpdir(), "tinycode-pyc")}`, "-m", "py_compile", path], { cwd: o.cwd });
     if (r.code !== 0) return { ok: false, out: `py_compile failed:\n${r.out}`.slice(0, 3200) };
     if (o.test && (o.test.path || o.test.command)) {
       const t = await runTests({

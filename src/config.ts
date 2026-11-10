@@ -108,6 +108,19 @@ export interface Config {
     checkpointBackoff: boolean;
     /** a "steady" milestone whose working tree (non-test files) is the one of the last checkpoint is skipped (the cut would rebuild the list the model just looped from) */
     checkpointSkipSame: boolean;
+    /** Pi's loop keeps its best tree (src/besttree.ts): snapshot on each new best, "worse than best" line, restore_best,
+     *  the stuck rule's restore and the end-of-request restore. false: counts are still tracked, nothing is kept or
+     *  restored, so undoWorse and stuckTestRuns have nothing to act on (feature C12, docs/features/FEATURES.md) */
+    loopBestTree: boolean;
+    /** a `write` that replaces an existing file once a test has passed gets "Whole-file rewrite. Prefer edit." (feature C21) */
+    rewriteNudge: boolean;
+    /** with rewriteNudge: the line says what the rewrite threw away against the file's best-tree copy (cut to under half,
+     *  top-level names dropped, Python that no longer parses) and that restore_best puts it back (feature E1,
+     *  docs/designs/rewrite_guard.md). Off until measured. Needs loopBestTree */
+    rewriteGuard: boolean;
+    /** `restore_best` is declared from the request's start, not only once a best tree exists (it says "No best tree yet."
+     *  until then), so the tool list does not change mid-run and the cached prefix holds (feature E12). Needs loopBestTree */
+    restoreToolAlways: boolean;
     /** a run_tests result worse than the best (fewer pass or more fail) puts the best tree back at once, test files untouched, with one line; the same break 3 times: auto-restore off until a new best */
     undoWorse: boolean;
     /** undoWorse acts from the Nth time the same break (counts and failing names) is seen since the best: 1 = at once; 2 = a first break gets the "Worse than best" line and may be fixed forward */
@@ -156,6 +169,14 @@ export interface Config {
    * Names: see INTERCEPTABLE (`ask` = the question hint). Default: ["fix","test"] (v1); [...INTERCEPTABLE] = every workflow.
    */
   intercept: string[];
+  /**
+   * C20, strict-template fix (src/alternate.ts): models whose chat template refuses a user message after a tool result or
+   * another user message (Mistral/Devstral with --jinja). Matched case-insensitively as a substring of the model id; only
+   * those get the merge. Others are left alone: on hybrid models (Qwen3.5/3.6) folding the per-turn tail into the last
+   * tool result breaks the prompt cache every turn (~1.7k recomputed tokens per call, bench/pairs/cachebreak.py).
+   * [] = off for every model; ["*"] = every model (the behaviour of 1f452ef).
+   */
+  strictRoles: string[];
   /**
    * Who chooses the workflow ("code decides, the model speaks"). Setting `orchestration` to a plain string ("auto", "code"
    * or "model") is shorthand for `{ mode: <string> }`.
@@ -268,6 +289,10 @@ export const DEFAULTS: Config = {
     checkpointKeepFiles: 0.25,
     checkpointBackoff: true,
     checkpointSkipSame: true,
+    loopBestTree: true,
+    rewriteNudge: true,
+    rewriteGuard: false,
+    restoreToolAlways: false,
     undoWorse: true,
     // 2: only a repeated break (operator 2026-10-30). The 16k v2 passes went through worse trees and fixed forward
     // (bowling r2 28/31 -> 3/31 -> 25/31 -> 31/31, paasio r3 22 -> 12 -> 23 -> 25, sgf r1 16 -> 6 -> 18); 1 = at once
@@ -292,6 +317,7 @@ export const DEFAULTS: Config = {
   route: { enabled: true, model: false },
   // v1 (operator 2026-10-30): tinyCode takes over only what it measured better at; everything else is plain Pi
   intercept: ["fix", "test"],
+  strictRoles: ["*"],
   orchestration: { mode: "auto", learn: true, minDecisions: 20, minAgreement: 0.9, window: 50 },
   test: { python: "python3", command: null },
 };
@@ -325,6 +351,8 @@ export function validate(cfg: Config): Config {
   const unknown = cfg.intercept.filter((n) => n !== "edit" && !(INTERCEPTABLE as readonly string[]).includes(n));
   if (unknown.length) throw new ConfigError(`intercept: unknown workflow ${unknown.map((n) => JSON.stringify(n)).join(", ")} (known: ${INTERCEPTABLE.join(", ")})`);
   cfg.intercept = [...new Set(cfg.intercept.map((n) => (n === "edit" ? "edit_file" : n)))];
+  if (!Array.isArray(cfg.strictRoles) || cfg.strictRoles.some((n) => typeof n !== "string" || !n))
+    throw new ConfigError(`strictRoles: must be a list of model-id substrings (or ["*"]), got ${JSON.stringify(cfg.strictRoles)}`);
   if (!["auto", "ladder", "pi"].includes(cfg.ladder.mode))
     throw new ConfigError(`ladder.mode: must be "auto", "ladder" or "pi" (Adaptive Ladder), got ${JSON.stringify(cfg.ladder.mode)}`);
   if (!(typeof cfg.limits.compactAt === "number" && cfg.limits.compactAt >= 0 && cfg.limits.compactAt <= 1)) throw new ConfigError("limits.compactAt: must be a share of the context window from 0 (off) to 1");
@@ -347,7 +375,7 @@ export function validate(cfg: Config): Config {
   if (!(typeof cfg.limits.checkpointMinSave === "number" && cfg.limits.checkpointMinSave >= 0 && cfg.limits.checkpointMinSave < 1)) throw new ConfigError("limits.checkpointMinSave: must be a share of the context window in [0, 1)");
   if (!(Number.isInteger(cfg.limits.checkpointGap) && cfg.limits.checkpointGap >= 1)) throw new ConfigError("limits.checkpointGap: must be an integer >= 1 (model calls)");
   if (!(typeof cfg.limits.checkpointKeepFiles === "number" && cfg.limits.checkpointKeepFiles >= 0 && cfg.limits.checkpointKeepFiles < 1)) throw new ConfigError("limits.checkpointKeepFiles: must be a share of the usable prompt in [0, 1) (0 = off)");
-  for (const k of ["checkpointBackoff", "checkpointSkipSame", "undoWorse", "forgiveEdits"] as const)
+  for (const k of ["checkpointBackoff", "checkpointSkipSame", "loopBestTree", "rewriteNudge", "rewriteGuard", "restoreToolAlways", "undoWorse", "forgiveEdits"] as const)
     if (typeof cfg.limits[k] !== "boolean") throw new ConfigError(`limits.${k}: must be true or false`);
   if (!(Number.isInteger(cfg.limits.undoWorseFrom) && cfg.limits.undoWorseFrom >= 1)) throw new ConfigError("limits.undoWorseFrom: must be an integer >= 1 (1 = at once)");
   for (const k of ["maskAboveTokens", "scriptLines", "freshFileLines"] as const)

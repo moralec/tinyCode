@@ -111,7 +111,16 @@ export function failureBlocks(raw: string, maxBlocks: number, maxLines: number):
   return blocks.slice(0, maxBlocks).join("\n\n");
 }
 
-const quote = (s: string) => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
+/**
+ * One shell word. POSIX: plain when it holds only safe characters, else single-quoted, so $(), backticks, ";" and "|"
+ * in a test path stay text (security audit 2026-11-09; the model's fix `test` argument and repo file names reach here).
+ * Windows (cmd.exe): double-quoted when it holds a space, a quote or a cmd metacharacter.
+ */
+export function shellQuote(s: string, win = process.platform === "win32"): string {
+  if (win) return /[\s"&|<>^()%!]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  return /^[A-Za-z0-9_./:=@%+,-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+}
+const quote = (s: string) => shellQuote(s);
 
 /** The command line to run: `test.command` as written, else `<python> -m pytest -q -p no:cacheprovider [test]`. */
 export function testCommand(cfg: TestConfig, test?: string): string {

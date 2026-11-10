@@ -90,3 +90,14 @@ test("scpt routine on macOS: compile, load, scripted edit, recompile, decompile 
   const names = (await import("node:fs")).readdirSync(d);
   assert.deepEqual(names.filter((n) => n.startsWith(".tinycode-")), [], "no temp dirs left");
 });
+
+test("py check: a repository py_compile.py next to the file is never imported (-I; security audit 2026-11-09)", async () => {
+  const d = tmpDir("tc-pyshadow-");
+  const mark = join(d, "SHADOW_RAN");
+  writeFileSync(join(d, "py_compile.py"), `open(${JSON.stringify(mark)}, "w").write("1")\n`);
+  writeFileSync(join(d, "a.py"), "x = 1\n");
+  const r = await pyRoutine.check(join(d, "a.py"), { cwd: d, python: PY });
+  assert.equal(r.ok, true);
+  assert.equal(existsSync(mark), false);
+  assert.equal(existsSync(join(d, "__pycache__")), false, "the .pyc still goes outside the project");
+});
