@@ -1,8 +1,9 @@
 // Repo outline: files + top-level Python names and signatures. Port of tc1.repo_files / tc1.outline, with a
 // line-based reader instead of Python's `ast` (see README rule: pure TypeScript, no Python at runtime).
 // Parity with tc1.outline() is tested on every bakeoff task repo (test/unit/outline.test.ts).
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { jsTopLevel } from "./strip.ts";
 
 export const SKIP_DIRS = new Set([".git", "__pycache__", ".venv", "venv", "node_modules", ".pytest_cache"]);
 export const TEXT_EXT = new Set([
@@ -18,8 +19,26 @@ function extOf(name: string): string {
   return i <= 0 ? "" : name.slice(i);
 }
 
-/** Text files under cwd, "/"-separated, in tc1 order: a directory's files (sorted), then its sub-directories (sorted). */
-export function repoFiles(cwd: string): string[] {
+function linksToFile(p: string): boolean {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Extensions each config language adds to TEXT_EXT ("py" adds none: its files are already listed). */
+export const LANG_EXT: Record<string, readonly string[]> = { ts: [".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs"] };
+/** Build output skipped next to a package.json when "ts" is on (only there, so a source folder named build/ stays) */
+const PACKAGE_BUILD_DIRS = new Set(["dist", "build", "coverage"]);
+
+/**
+ * Text files under cwd, "/"-separated, in tc1 order: a directory's files (sorted), then its sub-directories (sorted).
+ * `langs` (config languages) adds each language's extensions; the default lists exactly what it always did.
+ */
+export function repoFiles(cwd: string, langs: readonly string[] = ["py"]): string[] {
+  const ext = new Set([...TEXT_EXT, ...langs.flatMap((l) => LANG_EXT[l] ?? [])]);
+  const ts = langs.includes("ts");
   const out: string[] = [];
   const walk = (rel: string) => {
     let entries;
@@ -30,11 +49,13 @@ export function repoFiles(cwd: string): string[] {
     }
     const dirs: string[] = [];
     const files: string[] = [];
+    const packageRoot = ts && entries.some((e) => e.name === "package.json" && !e.isDirectory());
     for (const e of entries) {
       if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name) && !e.name.startsWith(".")) dirs.push(e.name);
-      } else if (e.isFile() || e.isSymbolicLink()) {
-        if (TEXT_EXT.has(extOf(e.name)) && !e.name.startsWith(".")) files.push(e.name);
+        if (!SKIP_DIRS.has(e.name) && !e.name.startsWith(".") && !(packageRoot && PACKAGE_BUILD_DIRS.has(e.name))) dirs.push(e.name);
+      } else if (e.isFile() || (e.isSymbolicLink() && linksToFile(join(cwd, rel, e.name)))) {
+        // a symlink only when it resolves to a file: a linked folder (a shared node_modules) is not a file to read (FEATURES D9)
+        if (ext.has(extOf(e.name)) && !e.name.startsWith(".")) files.push(e.name);
       }
     }
     for (const f of files.sort(cmp)) out.push(rel ? `${rel}/${f}` : f);
@@ -229,15 +250,61 @@ function lineCount(text: string): number {
 }
 
 /** The outline text: `path: def f(a); class C: m(self); X` per file, or names only when over `cap` chars. */
-export function outline(cwd: string, cap = 8000): string {
+/** The JS/TS files the outline reads symbols from with "ts" on (.tsx/.jsx stay `path (N lines)`: strip.ts refuses JSX). */
+const JS_OUTLINE = /\.(?:ts|mts|cts|js|mjs|cjs)$/;
+const HEADER_CHARS = 120;
+const MODIFIERS = /^(?:(?:export|default|async|declare)\s+)+/;
+
+/**
+ * One JS/TS file's outline parts (full form) and names (short form), in the shape of pyOutline: `function f(a): T`,
+ * `class C: m(), n()`, `type T` (interface, enum, export type). Top-level only (strip.ts jsTopLevel).
+ */
+export function jsOutline(src: string): { parts: string[]; names: string[] } {
+  const syms = jsTopLevel(src);
+  const parts: string[] = [];
+  const names: string[] = [];
+  for (const s of syms) {
+    if (s.kind === "function") {
+      const arrow = s.header.match(/(?:const|let|var)\s+([\w$]+)\s*(?::[^=]+)?=\s*(?:async\s*)?(\([^]*?\)|[\w$]+)/);
+      const text = arrow ? `function ${arrow[1]}${arrow[2]!.startsWith("(") ? arrow[2] : `(${arrow[2]})`}` : s.header.replace(MODIFIERS, "");
+      parts.push(text.slice(0, HEADER_CHARS));
+      names.push(s.name);
+    } else if (s.kind === "class") {
+      const methods = syms.filter((x) => x.kind === "method" && x.name.startsWith(`${s.name}.`)).map((x) => `${x.name.slice(s.name.length + 1)}()`);
+      parts.push(`class ${s.name}${methods.length ? `: ${methods.join(", ")}` : ""}`.slice(0, HEADER_CHARS));
+      names.push(s.name);
+    } else if (s.kind === "type") {
+      parts.push(`type ${s.name}`);
+      names.push(s.name);
+    }
+  }
+  return { parts, names };
+}
+
+/** `langs` (config languages): with "ts", JS/TS files list their top-level symbols like .py files do. */
+export function outline(cwd: string, cap = 8000, langs: readonly string[] = ["py"]): string {
   const full: string[] = [];
   const short: string[] = [];
-  for (const f of repoFiles(cwd)) {
+  const ts = langs.includes("ts");
+  for (const f of repoFiles(cwd, langs)) {
     let buf: Buffer;
     try {
       buf = readFileSync(join(cwd, f));
     } catch {
       continue;
+    }
+    if (ts && JS_OUTLINE.test(f)) {
+      let parsed: { parts: string[]; names: string[] } | null = null;
+      try {
+        parsed = jsOutline(new TextDecoder("utf-8", { fatal: true }).decode(buf));
+      } catch {
+        parsed = null; // not UTF-8: listed by size below
+      }
+      if (parsed && parsed.parts.length) {
+        full.push(`${f}: ${parsed.parts.join("; ")}`);
+        short.push(`${f}: ${parsed.names.join(", ")}`);
+        continue;
+      }
     }
     if (!f.endsWith(".py")) {
       const line = `${f} (${lineCount(buf.toString("utf8"))} lines)`;

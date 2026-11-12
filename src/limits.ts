@@ -11,15 +11,18 @@
 // recitation idea is Manus's; the "keep the prefix stable, put per-turn state at the tail" rule is PX section 4;
 // little-coder's `write-guard`/`read-guard` pair (Apache-2.0) is the model for the read and edit guards.
 //
-// Operator rule (2026-10-29): tinyCode never terminates or aborts a run. Guards nudge; after `stepBackAt`
-// interventions in a run, or a repeat that continues after its nudge, tinyCode STEPS BACK: it stops masking, view and
-// result caps, re-read refusals and oversized-edit refusals for the rest of that run, and Pi works as it would
-// without tinyCode. The todo tail and the prompt section stay (they only add).
+// Operator rule (2026-10-29; amended 2026-11-11, README rule 14): tinyCode never terminates or aborts a run. Guards
+// nudge; after `stepBackAt` interventions in a run, or a repeat that continues after its nudge, tinyCode STEPS BACK: it
+// makes no new masks, view or result caps, re-read refusals, oversized-edit refusals or nudges for the rest of that
+// run, and Pi works normally. What was already masked stays masked, so the context does not jump (E28,
+// `limits.stepBackKeepsMasks`), and a test command keeps its time limit (E24, `limits.bashTestSeconds`). The todo
+// tail and the prompt section stay (they only add).
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Config } from "./config.ts";
 import { logCall, logPath } from "./log.ts";
+import { isTestCommand } from "./testrun.ts";
 
 type Limit = Config["limits"];
 type Env = Record<string, string | undefined>;
@@ -201,19 +204,23 @@ function callInputs(messages: Msg[]): Map<string, { name: string; args: unknown 
 /** Pi's loop tools; any other tool is a tinyCode workflow (its result is the request's state: kept counts, failing tests). */
 /** how many most recently read files keep their latest read unmasked (the working set) */
 export const WORKING_SET_FILES = 3;
-export const LOOP_TOOL_NAMES = new Set(["read", "edit", "write", "bash", "find", "ls", "grep", "run_tests", "todo", "restore_best"]);
+/** Pi's shell tool: `bash`, or `powershell` on PowerShell (re-exported by src/tools.ts, which keeps Pi imports out of this file) */
+export const SHELL_TOOLS: readonly string[] = ["bash", "powershell"];
+export const LOOP_TOOL_NAMES = new Set(["read", "edit", "write", ...SHELL_TOOLS, "find", "ls", "grep", "run_tests", "todo", "restore_best"]);
 
 /**
  * The working set, never masked (connect on 3db5d78: the read of the file being fixed and the hand-over were masked by
  * call 8, the model could no longer see either and floundered for 100 calls): the latest `read` of each window of the
  * WORKING_SET_FILES most recently read paths, and the latest result of each workflow tool. Everything else masks as before.
  */
-export function workingSet(messages: Msg[], files = WORKING_SET_FILES): Set<string> {
+export function workingSet(messages: Msg[], files = WORKING_SET_FILES, unprotect?: ReadonlySet<string>): Set<string> {
   const calls = callInputs(messages);
   const latest = new Map<string, string>();
   const order: string[] = []; // read paths, most recent last
   for (const m of messages) {
     if (m.role !== "toolResult" || !m.toolCallId) continue;
+    // E27 rule 3: a retired plan call is not the latest of its tool; a later plan call is
+    if (unprotect?.has(m.toolCallId)) continue;
     const c = calls.get(m.toolCallId);
     const name = String(m.toolName ?? c?.name ?? "");
     const a = c?.args as { path?: unknown; offset?: unknown; limit?: unknown } | undefined;
@@ -332,6 +339,38 @@ function shortenAssistant(m: Msg, maxChars: number): Msg {
   return { ...m, content };
 }
 
+/** E27 rule 3: the assistant message with every string argument of a retired tool call replaced by its note. */
+function retireArgs(m: Msg, retired: ReadonlyMap<string, string>): Msg {
+  if (!Array.isArray(m.content)) return m;
+  const parts = m.content as AsstPart[];
+  if (!parts.some((p) => p.type === "toolCall" && p.id !== undefined && retired.has(p.id))) return m;
+  const content = parts.map((p) => {
+    const note = p.type === "toolCall" && p.id !== undefined ? retired.get(p.id) : undefined;
+    if (note === undefined || !p.arguments || typeof p.arguments !== "object") return p;
+    const args: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(p.arguments)) args[k] = typeof v === "string" ? `[masked: ${v.replace(/\n$/, "").split("\n").length} lines; ${note}]` : v;
+    return { ...p, arguments: args };
+  });
+  return { ...m, content };
+}
+
+/** The note a retired plan call gets (E27 rule 3). */
+export const PLAN_RETIRED_NOTE = "the plan is in .tinycode/plan.json";
+
+/** Ids of the `plan` tool calls in a message list (their calls or their results), in order. */
+export function planCallIds(messages: Msg[]): string[] {
+  const ids: string[] = [];
+  const add = (id: unknown) => {
+    if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
+  };
+  for (const m of messages) {
+    if (m.role === "toolResult" && m.toolName === "plan") add(m.toolCallId);
+    else if (m.role === "assistant" && Array.isArray(m.content))
+      for (const p of m.content as AsstPart[]) if (p.type === "toolCall" && p.name === "plan") add(p.id);
+  }
+  return ids;
+}
+
 export class Masker {
   /** Monotonic: once masked, always masked, so the prefix of the context only changes at batch boundaries. */
   private masked = new Map<string, string>();
@@ -354,9 +393,34 @@ export class Masker {
     this.maskArgChars = maskArgChars;
   }
 
+  /** E27 rule 3: retired tool-call ids (the plan once /build runs), with the note their call arguments get; monotonic too */
+  private retired = new Map<string, string>();
+
+  /**
+   * E27 rule 3 (limits.retirePlan): mask these tool calls now, results and call arguments, whatever their length, and
+   * leave them out of the working set. By id, not by tool name: a later call of the same tool is served as usual.
+   * Returns the ids newly retired.
+   */
+  retire(messages: Msg[], ids: readonly string[], note: string): string[] {
+    const fresh = ids.filter((id) => !this.retired.has(id));
+    for (const m of messages) {
+      if (m.role !== "toolResult" || !m.toolCallId || !fresh.includes(m.toolCallId)) continue;
+      const lines = resultText(m).replace(/\n$/, "").split("\n").length;
+      this.masked.set(m.toolCallId, `[masked: ${m.toolName ?? "tool"}, ${lines} lines; ${note}]`);
+    }
+    for (const id of fresh) this.retired.set(id, note);
+    return fresh;
+  }
+
+  /** Ids retired so far (E27 rule 3). */
+  get retiredIds(): ReadonlySet<string> {
+    return new Set(this.retired.keys());
+  }
+
   reset(): void {
     this.masked.clear();
     this.shortened.clear();
+    this.retired.clear();
     this.batches = 0;
     this.pressureBatches = 0;
     this.lastPressure = null;
@@ -373,14 +437,21 @@ export class Masker {
     return this.render(messages) ?? messages;
   }
 
+  /** The masks so far applied (no new batch); `undefined` when nothing has ever been masked (E28's kept view). */
+  kept(messages: Msg[]): Msg[] | undefined {
+    return this.render(messages);
+  }
+
   private render(messages: Msg[]): Msg[] | undefined {
-    if (!this.masked.size && !this.shortened.size) return undefined;
+    if (!this.masked.size && !this.shortened.size && !this.retired.size) return undefined;
     return messages.map((m) => {
       if (m.role === "toolResult" && m.toolCallId) {
         const ph = this.masked.get(m.toolCallId);
         return ph === undefined ? m : { ...m, content: [{ type: "text", text: ph }] };
       }
-      return m.role === "assistant" && this.shortened.has(asstKey(m)) ? shortenAssistant(m, this.maskArgChars) : m;
+      if (m.role !== "assistant") return m;
+      const s = this.shortened.has(asstKey(m)) ? shortenAssistant(m, this.maskArgChars) : m;
+      return this.retired.size ? retireArgs(s, this.retired) : s;
     });
   }
 
@@ -412,7 +483,7 @@ export class Masker {
     this.lastPressure = null;
     const prev = this.render(messages); // as the model saw it at the last call: the masks of earlier batches only
     const results = messages.filter((m) => m.role === "toolResult" && m.toolCallId);
-    const keep = workingSet(messages);
+    const keep = workingSet(messages, WORKING_SET_FILES, this.retired.size ? this.retiredIds : undefined);
     const older = results.slice(0, Math.max(0, results.length - this.keepRecent)).filter((m) => !keep.has(m.toolCallId as string));
     const fresh = older.filter((m) => !this.masked.has(m.toolCallId as string));
     const cands = this.shortenable(messages);
@@ -658,6 +729,56 @@ export function oversizeReason(toolName: string, input: unknown, maxTokens: numb
     : null;
 }
 
+// ---------------------------------------------------------------- E23: long actions refused once (loop guards 2)
+
+const lineCount = (s: unknown): number => String(s ?? "").replace(/\n$/, "").split("\n").length;
+
+/**
+ * The refusal for a long shell command (over `bashMax` lines) or a long `write` (over `writeMax` lines), or null.
+ * 0 = that check off. `what` names it for the "served" tail line.
+ */
+export function oversizeLinesReason(toolName: string, input: unknown, bashMax: number, writeMax: number): { reason: string; what: string } | null {
+  const i = input as { command?: unknown; content?: unknown } | undefined;
+  if (!i || typeof i !== "object") return null;
+  if (bashMax > 0 && SHELL_TOOLS.includes(toolName) && typeof i.command === "string") {
+    const n = lineCount(i.command);
+    if (n > bashMax) return { reason: `${toolName} command ${n} lines, over ${bashMax}. Write the script to a file, then run it.`, what: `long ${toolName} command, ${n} lines` };
+  }
+  if (writeMax > 0 && toolName === "write" && typeof i.content === "string") {
+    const n = lineCount(i.content);
+    if (n > writeMax) return { reason: `write ${n} lines, over ${writeMax}. Write up to ${writeMax} lines, then add the rest with edit.`, what: `long write, ${n} lines` };
+  }
+  return null;
+}
+
+/** E23's arm values for the shadow lines while the keys are off: 2 x limits.scriptLines (40 by default), and 150. */
+export const WRITE_MAX_ARM = 150;
+
+/**
+ * The long calls refused in this run (by canonical key, like ReadMemory): the same call sent again is served, so a call
+ * is never refused twice in a row; and how many refusals the run has had (from the 3rd on, each is an intervention).
+ */
+export class ActionMemory {
+  private refused = new Set<string>();
+  refusals = 0;
+
+  reset(): void {
+    this.refused.clear();
+    this.refusals = 0;
+  }
+
+  /** true: refuse (first sighting, now remembered); false: this exact call was refused before, serve it */
+  refuse(key: string): boolean {
+    if (this.refused.has(key)) return false;
+    this.refused.add(key);
+    this.refusals++;
+    return true;
+  }
+}
+
+/** From this E23 refusal of a run on, each refusal counts as an intervention (the first ones are free). */
+export const LONG_ACTION_FREE = 2;
+
 // ---------------------------------------------------------------- call budget
 
 /**
@@ -687,6 +808,17 @@ export class TurnCap {
   }
 }
 
+// ---------------------------------------------------------------- shadow logging (loop guards 2)
+
+/**
+ * One `tinycode-calls.jsonl` line each time a loop-guards-2 feature acts (`step` = the feature) or, with its key off,
+ * would have acted (`would_<step>`): the matched control the measurement needs (docs/designs/loop-guards-2/design.md,
+ * "How it is measured"). Token counts go in `status`, never in prompt_tokens; no request body changes.
+ */
+export function logShadow(session: string, step: string, on: boolean, status: string, env: Env = process.env): void {
+  logCall({ ts: new Date().toISOString(), session, workflow: "pi", step: on ? step : `would_${step}`, lane: "", model: "", prompt_tokens: 0, cached_tokens: 0, completion_tokens: 0, ms: 0, status }, env);
+}
+
 // ---------------------------------------------------------------- the bundle index.ts wires
 
 export interface LimitState {
@@ -695,6 +827,9 @@ export interface LimitState {
   turns: TurnCap;
   todo: Todo;
   reads: ReadMemory;
+  /** E23: the long calls refused in this run; `actionShadow` the ones the arm values would have refused while the keys are off */
+  actions: ActionMemory;
+  actionShadow: ActionMemory;
   /** files (absolute paths) a workflow just wrote or kept for a hand-over: their next read is served whole (limits.freshFileLines) */
   fresh: Set<string>;
   /** the last assistant reply stopped on the output limit (S4b): the next tail says so */
@@ -715,15 +850,34 @@ export interface LimitState {
   mask(messages: Msg[], pressure?: PressureCtx): Msg[] | undefined;
   /** result cap, unless stepped back */
   cap(text: string): string | null;
+  /**
+   * The usable-line backstop: stepped back, a list whose sent form (`masked`, else `messages`) is over `usable` gets one
+   * batch anyway (a request never goes out over the line). Returns what to send: `masked` unchanged otherwise.
+   */
+  backstop(messages: Msg[], masked: Msg[] | undefined, usable: number, pressure: PressureCtx): Msg[] | undefined;
+  /**
+   * E27 rule 3 (limits.retirePlan): /build starts, so the `plan` calls in `messages` are masked (results and arguments).
+   * Off, or stepped back: nothing changes and the shadow line says what would have been masked. Returns the ids retired.
+   */
+  retirePlan(messages: Msg[]): string[];
+  /** a loop-guards-2 shadow line (logShadow) with this state's session and log */
+  shadow(step: string, on: boolean, status: string): void;
 }
 
+/** E27 rule 2's arm value (design: "the arm uses 150"): with freshServeLines off, the shadow line counts the whole reads it would cut. */
+export const FRESH_SERVE_ARM = 150;
+
 export function createLimits(limits: Limit, session: string, env: Env = process.env): LimitState {
+  /** E28's line is written once per run, at the first masking call after the step-back */
+  let keptLogged = false;
   const state: LimitState = {
     guard: new RepeatGuard(limits.repeatBlockAt),
     masker: new Masker(limits.maskAboveTokens, limits.keepRecentResults, limits.pressureAt, limits.maskArgChars),
     turns: new TurnCap(limits.turnCap),
     todo: new Todo(),
     reads: new ReadMemory(),
+    actions: new ActionMemory(),
+    actionShadow: new ActionMemory(),
     fresh: new Set(),
     outputLimitHit: false,
     stepped: false,
@@ -736,12 +890,15 @@ export function createLimits(limits: Limit, session: string, env: Env = process.
       state.turns.reset();
       state.todo.reset();
       state.reads.reset();
+      state.actions.reset();
+      state.actionShadow.reset();
       state.outputLimitHit = false;
       state.stepped = false;
       state.stepBackReason = null;
       state.interventions = 0;
       state.tailNotes = [];
       state.turns.cap = turnCap ?? limits.turnCap;
+      keptLogged = false;
     },
     intervene(kind) {
       if (state.stepped) return;
@@ -770,7 +927,18 @@ export function createLimits(limits: Limit, session: string, env: Env = process.
       );
     },
     mask(messages, pressure) {
-      if (state.stepped) return undefined;
+      if (state.stepped) {
+        // E28 (limits.stepBackKeepsMasks): the masks made before the step-back stay; no new batch. Off: the shadow line only.
+        const kept = state.masker.kept(messages);
+        if (!keptLogged) {
+          keptLogged = true;
+          if (kept) {
+            const saved = contextTokens(messages, 0, true) - contextTokens(kept, 0, true);
+            logShadow(session, "step_back_keeps_masks", limits.stepBackKeepsMasks, `${saved} tokens kept masked at the step-back`, env);
+          }
+        }
+        return limits.stepBackKeepsMasks ? kept : undefined;
+      }
       const out = state.masker.apply(messages, pressure);
       const p = state.masker.lastPressure;
       if (p) {
@@ -794,6 +962,23 @@ export function createLimits(limits: Limit, session: string, env: Env = process.
       return out;
     },
     cap: (text) => (state.stepped ? null : capText(text, limits, state.save)),
+    backstop(messages, masked, usable, pressure) {
+      if (state.stepped && usable > 0 && sizeTokens(masked ?? messages, pressure.systemChars) > usable) return state.masker.apply(messages, pressure);
+      return masked;
+    },
+    retirePlan(messages) {
+      const already = state.masker.retiredIds;
+      const ids = planCallIds(messages).filter((id) => !already.has(id));
+      if (!ids.length) return [];
+      const on = limits.retirePlan && !state.stepped;
+      const calls = callInputs(messages);
+      const chars = messages.reduce((n, m) => n + (m.role === "toolResult" && m.toolCallId && ids.includes(m.toolCallId) ? resultText(m).length : 0), 0) +
+        ids.reduce((n, id) => n + JSON.stringify(calls.get(id)?.args ?? {}).length, 0);
+      const done = on ? state.masker.retire(messages, ids, PLAN_RETIRED_NOTE) : [];
+      logShadow(session, "retire_plan", on, `${ids.length} plan call(s), ~${approxTokens(chars)} tokens${state.stepped ? " (stepped back)" : ""}`, env);
+      return done;
+    },
+    shadow: (step, on, status) => logShadow(session, step, on, status, env),
   };
   return state;
 }
@@ -805,6 +990,8 @@ export interface CallEnv {
   windowHash(absPath: string, offset: number, limit: number): string;
   /** number of lines of the file, or -1 when it cannot be read (absent: fresh files are not served whole) */
   lineCount?(absPath: string): number;
+  /** E24: the timeout in seconds for a shell test command with none of its own (src/testrun.ts bashTestSeconds); 0 or absent = none */
+  testSeconds?(): number;
 }
 
 /**
@@ -821,6 +1008,12 @@ export function toolCallVerdict(
   env: CallEnv,
 ): Verdict {
   if (lim.turns.over) return { action: "block", reason: BUDGET_REASON };
+  // E24 (limits.bashTestSeconds): a shell call that runs tests and sets no timeout gets one (mutates `input`, as capView
+  // does); Pi kills the process tree. Kept after a step-back (README rule 14 as amended); a model's own timeout stays.
+  if (SHELL_TOOLS.includes(toolName) && (input.timeout === undefined || input.timeout === null) && isTestCommand(String(input.command ?? ""))) {
+    const s = env.testSeconds?.() ?? 0;
+    if (s > 0) input.timeout = s;
+  }
   if (lim.stepped) return { action: "allow" };
   // A file the workflow just wrote or kept is served whole on its first read (a cut copy reads as unfinished code).
   let whole = false;
@@ -828,7 +1021,14 @@ export function toolCallVerdict(
     const abs = env.resolvePath(String(input.path ?? ""));
     if (lim.fresh.delete(abs)) {
       const n = env.lineCount?.(abs) ?? -1;
-      whole = n >= 0 && n <= limits.freshFileLines;
+      // E27 rule 2 (limits.freshServeLines): its own line for this decision; checkpoints keep reading freshFileLines
+      const line = limits.freshServeLines || limits.freshFileLines;
+      whole = n >= 0 && n <= line;
+      // shadow: on, each cut it made; off, each whole read the armed value (FRESH_SERVE_ARM) would have cut
+      const on = limits.freshServeLines > 0;
+      const armed = on ? limits.freshServeLines : FRESH_SERVE_ARM;
+      if (n > armed && (on || n <= limits.freshFileLines))
+        lim.shadow("fresh_serve_cut", on, `${String(input.path ?? "")} ${n} lines, over ${armed}: ${limits.viewLines}-line view`);
     }
   }
   if (!whole) capView(toolName, input, limits.viewLines);
@@ -847,6 +1047,23 @@ export function toolCallVerdict(
     lim.tailNotes.push(REPEAT_NUDGE);
     lim.intervene("repeat");
     return { action: "allow" };
+  }
+  // E23 (limits.bashMaxLines, limits.writeMaxLines): after the repeat guard, so it sees every refused call. A long call
+  // is refused once; the same call sent again is served with a tail line; from the 3rd refusal of the run on, each is an
+  // intervention, so a model that keeps sending new long scripts reaches the step-back (README rule 14).
+  const longKey = (): string => `${toolName}${canonicalJson(input)}`;
+  const long = oversizeLinesReason(toolName, input, limits.bashMaxLines, limits.writeMaxLines);
+  if (long) {
+    if (lim.actions.refuse(longKey())) {
+      lim.shadow("long_action", true, long.reason);
+      if (lim.actions.refusals > LONG_ACTION_FREE) lim.intervene("long action");
+      return { action: "block", reason: long.reason };
+    }
+    lim.tailNotes.push(`served: ${long.what}`);
+  } else {
+    // shadow: the arm values (2 x scriptLines, 150) for each check that is off
+    const armed = oversizeLinesReason(toolName, input, limits.bashMaxLines ? 0 : 2 * limits.scriptLines, limits.writeMaxLines ? 0 : WRITE_MAX_ARM);
+    if (armed && lim.actionShadow.refuse(longKey())) lim.shadow("long_action", false, armed.reason);
   }
   if (toolName === "read") {
     const path = env.resolvePath(String(input.path ?? ""));

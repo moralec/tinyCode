@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 export interface Lane {
   baseUrl: string;
@@ -95,6 +95,10 @@ export interface Config {
     maskArgChars: number;
     /** tokens a reply needs after Pi's own 4096-token clamp (src/limits.ts usableTokens): pressureAt, piCompactReserve and the checkpoint backstop never sit above window - 4096 - this */
     outputReserve: number;
+    /** E13: a direct run's `task` argument that repeats the user's request word for word is shown to the model as "(the request above)" (src/orchestrate.ts TASK_REF); off until measured */
+    taskRef: boolean;
+    /** E4: Pi's tool list and edit rules in the system prompt become one terse rule line (src/prompt.ts TERSE_RULES); off until measured */
+    terseSystem: boolean;
     /** milestone checkpoints (src/checkpoint.ts): at a milestone (new best test count, or an edit then tests at the best count), when the prompt is over this share of the usable prompt (window - 4096 - outputReserve: 10240 at 16k, 26624 at 32k), what was sent between the request and the milestone's turn is replaced by one note; 0 = off (also the backstop) */
     checkpointAt: number;
     /** a checkpoint must take out at least this share of the window (else no cache break for it) */
@@ -141,6 +145,23 @@ export interface Config {
     contextFileTokens: number;
     /** share of the model's context window a context file may take before it is digested (the floor is contextFileTokens): 0.05 = 1.6k at 32k, 6.5k at 131k */
     contextFileShare: number;
+    // ---- loop guards 2 (docs/designs/loop-guards-2/design.md): every key off by default, measured before it is turned on
+    /** E28: after a step-back the masks made before it stay (README rule 14 as amended); no new mask after it, apart from the usable-line backstop */
+    stepBackKeepsMasks: boolean;
+    /** E27 rule 3: when /build starts, the plan's calls and results already in the context are masked (the plan is in .tinycode/plan.json) */
+    retirePlan: boolean;
+    /** E27 rule 2: a fresh file (freshFileLines) is served whole on its first read only up to this many lines; 0 = follow freshFileLines. Checkpoints' kept files keep reading freshFileLines */
+    freshServeLines: number;
+    /** E24: run_tests' limit is clamp(this x the request's longest clean run, 30 s, 300 s); 300 s before a clean run and right after a timeout; 0 = off (300 s always). Suggested 10 */
+    testTimeScale: number;
+    /** E24: a bash/powershell call that runs tests and sets no timeout of its own gets this many seconds (the scaled limit when testTimeScale is on and it is smaller); kept after a step-back; 0 = off. Suggested 120 */
+    bashTestSeconds: number;
+    /** E23: a bash/powershell call whose command has more lines than this is refused once (write the script to a file); the same call sent again is served; 0 = off. Armed value 40 (2 x scriptLines) */
+    bashMaxLines: number;
+    /** E23: a write whose content has more lines than this is refused once (write part, add the rest with edit); the same call sent again is served; 0 = off. Armed value 150 */
+    writeMaxLines: number;
+    /** E22: a snapshot of the original tree once per request (lazily, before the first change); the same failure 3 runs in a row offers `restore_best to=start` (declared from the request's start); a fresh-attempt state while the model rebuilds. Needs loopBestTree (ignored without it, like rewriteGuard) */
+    startOver: boolean;
     maxTokens: Record<string, number>;
   };
   /** "auto" (default): tinyCode asks no diagnostic questions; "dev": shows stuck confirm, router hint, events, per-call tokens (/dev on|off) */
@@ -157,6 +178,18 @@ export interface Config {
     resultChars: number;
     /** words in the returned answer */
     answerWords: number;
+    /** recorded GitHub/web responses (absolute path to a JSON file; design research-replay): /research answers every
+     * fetch from it, makes no GitHub or web call and no DNS query, and stops with the reason when it cannot be used.
+     * null (default) = the network, as always. For benches and tests. */
+    replay: string | null;
+    /** E19 (design research-grounding): project, vendored or pinned code questions go to `find` first, library and
+     * prior-art questions to GitHub first; a source that fails once (network failure, HTTP 401/403/429) is dropped for
+     * the run. false (default) = today's prompt and no drop. */
+    localFirst: boolean;
+    /** E20 (design research-grounding): `find` results inside /research carry their cited lines read from tracked
+     * files; the summary returns 1-4 facts with quotes checked by code; the trunk sees the facts first and a check
+     * request on the STATUS done line. false (default) = today's summary and result. */
+    grounded: boolean;
   };
   /** model: when the code router is unsure, ask the small lane (one call); false = unsure stays "none", no call */
   route: { enabled: boolean; model: boolean };
@@ -194,8 +227,27 @@ export interface Config {
     minAgreement: number;
     window: number;
   };
+  /** test.command: the project's test command, run in cwd through the shell; `{test}` in it becomes the named test file (quoted), or nothing when the whole suite runs */
   test: { python: string; command: string | null };
+  /** languages tinyCode treats as its own beyond Python (design languages-and-oracles): "ts" = TypeScript/JavaScript
+   * (file list, undo, outline, the project's own npm test). "py" is always on. Default ["py","ts"]: "ts" on since the gate passed (FEATURES D8, 2026-11-10); ["py"] turns it off. */
+  languages: string[];
+  /** design plan-build-fit: /plan and /build stages, each off until measured (FEATURES rule) */
+  stages: {
+    /** E21: a second plan call over the files the draft's tasks name (plus their imports and importers); tasks may carry a check */
+    planReview: boolean;
+    /** E21b: /build runs a task's own check (from the saved plan) as part of its test, shows it in the task header,
+     * and, under wholeCheck, re-runs earlier tasks' checks (stale-check?). Separate from planReview (Addendum 2) */
+    buildChecks: boolean;
+    /** E21: characters of file text the review call is shown (at least 1000) */
+    planReadChars: number;
+    /** E25: the whole suite after each /build task (plus earlier tasks' checks under buildChecks); one repair */
+    wholeCheck: boolean;
+  };
 }
+
+/** the values config `languages` accepts */
+export const LANGUAGES = ["py", "ts"] as const;
 
 const DOOR = "http://127.0.0.1:8080/v1";
 /** the context size assumed for a lane that sets no contextWindow (Pi's provider registration and the ladder's quick tries) */
@@ -281,6 +333,8 @@ export const DEFAULTS: Config = {
     pressureAt: 0.7,
     maskArgChars: 400,
     outputReserve: 2048,
+    taskRef: false,
+    terseSystem: false,
     checkpointAt: 0.55,
     checkpointMinSave: 0.1,
     checkpointGap: 4,
@@ -308,11 +362,20 @@ export const DEFAULTS: Config = {
     contextFileTokens: 1500,
     // operator 2026-11-02: the budget grows with the window (131k gpt-oss): digest still, but keep more of the file
     contextFileShare: 0.05,
+    // loop guards 2: off until measured (FEATURES E22-E24, E27, E28)
+    stepBackKeepsMasks: false,
+    retirePlan: false,
+    freshServeLines: 0,
+    testTimeScale: 0,
+    bashTestSeconds: 0,
+    bashMaxLines: 0,
+    writeMaxLines: 0,
+    startOver: false,
     maxTokens: { pick: 300, edit: 4096, review: 600, branch: 180, hunk: 600, route: 200, plan: 2500, research: 200, explain: 400, doc: 1500, ask: 600, commit: 300 },
   },
   mode: "auto",
   progress: { stuckCalls: 25, heartbeatSeconds: 60 },
-  research: { maxSteps: 8, maxTokens: 20000, resultChars: 3500, answerWords: 200 },
+  research: { maxSteps: 8, maxTokens: 20000, resultChars: 3500, answerWords: 200, replay: null, localFirst: false, grounded: false },
   // code router only (lite v1): an unsure request goes to plain Pi, no small-lane call
   route: { enabled: true, model: false },
   // v1 (operator 2026-10-30): tinyCode takes over only what it measured better at; everything else is plain Pi
@@ -320,6 +383,8 @@ export const DEFAULTS: Config = {
   strictRoles: ["*"],
   orchestration: { mode: "auto", learn: true, minDecisions: 20, minAgreement: 0.9, window: 50 },
   test: { python: "python3", command: null },
+  languages: ["py", "ts"],
+  stages: { planReview: true, buildChecks: false, planReadChars: 8000, wholeCheck: false },
 };
 
 type Json = Record<string, unknown>;
@@ -339,6 +404,9 @@ export const PI_COMPACT_MAX_SUM = 0.6;
 export class ConfigError extends Error {}
 
 export function validate(cfg: Config): Config {
+  // E17 was denied and removed on 2026-11-12: a config that still sets it is told so, not silently ignored
+  if ("acceptance" in cfg)
+    throw new ConfigError('acceptance: removed on 2026-11-12 (E17, the acceptance check written from the request, was denied); delete the "acceptance" block from the config');
   if (cfg.mode !== "auto" && cfg.mode !== "dev") throw new ConfigError(`mode: must be "auto" or "dev", got ${JSON.stringify(cfg.mode)}`);
   if (!["auto", "code", "model"].includes(cfg.orchestration.mode))
     throw new ConfigError(`orchestration: mode must be "auto", "code" or "model", got ${JSON.stringify(cfg.orchestration.mode)}`);
@@ -353,6 +421,12 @@ export function validate(cfg: Config): Config {
   cfg.intercept = [...new Set(cfg.intercept.map((n) => (n === "edit" ? "edit_file" : n)))];
   if (!Array.isArray(cfg.strictRoles) || cfg.strictRoles.some((n) => typeof n !== "string" || !n))
     throw new ConfigError(`strictRoles: must be a list of model-id substrings (or ["*"]), got ${JSON.stringify(cfg.strictRoles)}`);
+  if (cfg.research.replay !== null && (typeof cfg.research.replay !== "string" || !isAbsolute(cfg.research.replay)))
+    throw new ConfigError(`research.replay: must be null or an absolute path to a recording file, got ${JSON.stringify(cfg.research.replay)}`);
+  for (const k of ["localFirst", "grounded"] as const)
+    if (typeof cfg.research[k] !== "boolean") throw new ConfigError(`research.${k}: must be true or false`);
+  if (!Array.isArray(cfg.languages) || cfg.languages.some((n) => !(LANGUAGES as readonly unknown[]).includes(n)) || !cfg.languages.includes("py"))
+    throw new ConfigError(`languages: must be a list of ${LANGUAGES.map((l) => JSON.stringify(l)).join(", ")} that includes "py", got ${JSON.stringify(cfg.languages)}`);
   if (!["auto", "ladder", "pi"].includes(cfg.ladder.mode))
     throw new ConfigError(`ladder.mode: must be "auto", "ladder" or "pi" (Adaptive Ladder), got ${JSON.stringify(cfg.ladder.mode)}`);
   if (!(typeof cfg.limits.compactAt === "number" && cfg.limits.compactAt >= 0 && cfg.limits.compactAt <= 1)) throw new ConfigError("limits.compactAt: must be a share of the context window from 0 (off) to 1");
@@ -371,6 +445,8 @@ export function validate(cfg: Config): Config {
   if (!(Number.isInteger(cfg.ladder.reviewOutlineChars) && cfg.ladder.reviewOutlineChars >= 0)) throw new ConfigError("ladder.reviewOutlineChars: must be an integer >= 0 (0 = no outline)");
   if (!(Number.isInteger(cfg.limits.maskArgChars) && cfg.limits.maskArgChars > 0)) throw new ConfigError("limits.maskArgChars: must be a positive integer");
   if (!(Number.isInteger(cfg.limits.outputReserve) && cfg.limits.outputReserve >= 0)) throw new ConfigError("limits.outputReserve: must be an integer >= 0 (tokens)");
+  if (typeof cfg.limits.terseSystem !== "boolean") throw new ConfigError("limits.terseSystem: must be true or false");
+  if (typeof cfg.limits.taskRef !== "boolean") throw new ConfigError("limits.taskRef: must be true or false");
   if (!(typeof cfg.limits.checkpointAt === "number" && cfg.limits.checkpointAt >= 0 && cfg.limits.checkpointAt <= 1)) throw new ConfigError("limits.checkpointAt: must be a share of the context window from 0 (off) to 1");
   if (!(typeof cfg.limits.checkpointMinSave === "number" && cfg.limits.checkpointMinSave >= 0 && cfg.limits.checkpointMinSave < 1)) throw new ConfigError("limits.checkpointMinSave: must be a share of the context window in [0, 1)");
   if (!(Number.isInteger(cfg.limits.checkpointGap) && cfg.limits.checkpointGap >= 1)) throw new ConfigError("limits.checkpointGap: must be an integer >= 1 (model calls)");
@@ -383,6 +459,13 @@ export function validate(cfg: Config): Config {
   if (!(typeof cfg.limits.contextFileShare === "number" && cfg.limits.contextFileShare >= 0 && cfg.limits.contextFileShare < 1)) throw new ConfigError("limits.contextFileShare: must be a share of the context window in [0, 1)");
   for (const k of ["stuckTestRuns", "autoContinue", "contextFileTokens"] as const)
     if (!(Number.isInteger(cfg.limits[k]) && cfg.limits[k] >= 0)) throw new ConfigError(`limits.${k}: must be an integer >= 0 (0 = off)`);
+  // loop guards 2 (docs/designs/loop-guards-2/design.md)
+  for (const k of ["stepBackKeepsMasks", "retirePlan", "startOver"] as const)
+    if (typeof cfg.limits[k] !== "boolean") throw new ConfigError(`limits.${k}: must be true or false`);
+  for (const k of ["freshServeLines", "bashTestSeconds", "bashMaxLines", "writeMaxLines"] as const)
+    if (!(Number.isInteger(cfg.limits[k]) && cfg.limits[k] >= 0)) throw new ConfigError(`limits.${k}: must be an integer >= 0 (0 = off)`);
+  if (!(typeof cfg.limits.testTimeScale === "number" && Number.isFinite(cfg.limits.testTimeScale) && cfg.limits.testTimeScale >= 0))
+    throw new ConfigError("limits.testTimeScale: must be a finite number >= 0 (0 = off)");
   for (const [name, lane] of Object.entries(cfg.lanes)) {
     if (lane === null) continue;
     if (!isObj(lane) || typeof lane.baseUrl !== "string" || typeof lane.model !== "string" || !lane.baseUrl || !lane.model)
@@ -405,6 +488,11 @@ export function validate(cfg: Config): Config {
       if (cfg.lanes[ref] === null) throw new ConfigError(`steps.${name}.${key}: lane "${ref}" is null (not configured)`);
     }
   }
+  // design plan-build-fit (E21a, E21b, E25)
+  for (const k of ["planReview", "buildChecks", "wholeCheck"] as const)
+    if (typeof cfg.stages[k] !== "boolean") throw new ConfigError(`stages.${k}: must be true or false, got ${JSON.stringify(cfg.stages[k])}`);
+  if (!(Number.isInteger(cfg.stages.planReadChars) && cfg.stages.planReadChars >= 1000))
+    throw new ConfigError(`stages.planReadChars: must be an integer of at least 1000, got ${JSON.stringify(cfg.stages.planReadChars)}`);
   return cfg;
 }
 

@@ -9,7 +9,7 @@ import { tmpDir } from "./tmpdir.ts";
 import { ConfigError, DEFAULTS, INTERCEPTABLE, mergeConfig } from "../../src/config.ts";
 import { MEMORY_PROMPT, approxTokens } from "../../src/limits.ts";
 import { choose } from "../../src/orchestrate.ts";
-import { composePrompt } from "../../src/prompt.ts";
+import { composePrompt, TERSE_RULES, terseRules } from "../../src/prompt.ts";
 import { buildIndex, heuristic } from "../../src/router.ts";
 import { hintFor, interceptKey, intercepts, SPECS, todoFirst, TOOLS_FIRST_PROMPT, toolsFirstPrompt, triage, WORKFLOW_TOOLS, workflowTools } from "../../src/tools.ts";
 
@@ -363,4 +363,13 @@ test("the extension, kept files: a checkpoint after an edit sends the file's tex
   assert.equal(read("rr2"), undefined, "asked again: served");
   // an unkept file read before the checkpoint is served at once (its read was cut away)
   assert.equal(call("tool_call", { toolName: "read", toolCallId: "rr3", input: { path: join(cwd, "orders/other.py"), offset: 1 } })[0], undefined);
+});
+
+test("composePrompt terse (E4, limits.terseSystem): Pi's tool list and rules become one line; off = unchanged", () => {
+  assert.equal(composePrompt("P", 20, [], {}), composePrompt("P", 20, []));
+  const pi = readFileSync(new URL("../fixtures/pi-system-prompt.txt", import.meta.url), "utf8");
+  const terse = composePrompt(pi, 20, [], { terse: true });
+  assert.ok(!terse.includes("<tools>") && terse.includes(`<rules>\n${TERSE_RULES} write:`));
+  assert.ok(terse.length < composePrompt(pi, 20, []).length - 700, "E4 saves ~800 chars (~220 tokens) of Pi's prompt");
+  assert.equal(terseRules("custom prompt"), "custom prompt", "no markers: unchanged");
 });

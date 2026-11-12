@@ -1,0 +1,33 @@
+
+ RUN  v2.1.9 <dir>
+
+ ❯ math.test.js (2 tests | 1 failed) 13ms
+   × math > multiplies two numbers 9ms
+     → expected 5 to deeply equal 6
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  math.test.js > math > multiplies two numbers
+AssertionError: expected 5 to deeply equal 6
+
+- Expected
++ Received
+
+- 6
++ 5
+
+ ❯ math.test.js:10:23
+      8| 
+      9|   test('multiplies two numbers', () => {
+     10|     expect(mul(2, 3)).toEqual(6);
+       |                       ^
+     11|   });
+     12| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed (2)
+   Start at  13:47:03
+   Duration  465ms (transform 35ms, setup 0ms, collect 20ms, tests 13ms, environment 0ms, prepare 138ms)
+

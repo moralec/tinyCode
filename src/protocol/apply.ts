@@ -49,6 +49,8 @@ export interface ApplyOptions {
   maxWholeFileLines?: number;
   /** where a resolved path is logged (src/log.ts; default process.env) */
   env?: Record<string, string | undefined>;
+  /** config languages: which files a wrong path is matched against (repoFiles); default Python only */
+  langs?: readonly string[];
 }
 
 const PLACEHOLDER = /^(?:\.\/)?path\/to\//i;
@@ -59,7 +61,7 @@ const PLACEHOLDER = /^(?:\.\/)?path\/to\//i;
  * missing and an edit of an existing file (`existing`): the one non-test file of the tree with that name. 0 or 2+ such
  * files: the path as written. `files` = the tree's files, "/"-separated (default repoFiles).
  */
-export function resolveBlockPath(cwd: string, path: string, existing: boolean, files?: string[]): string {
+export function resolveBlockPath(cwd: string, path: string, existing: boolean, files?: string[], langs: readonly string[] = ["py"]): string {
   const there = (p: string) => {
     const abs = safeResolve(cwd, p);
     try {
@@ -73,12 +75,12 @@ export function resolveBlockPath(cwd: string, path: string, existing: boolean, f
   if (stripped !== path && stripped && (there(stripped) || !existing)) return stripped;
   if (!existing) return path;
   const name = basename(stripped);
-  const same = (files ?? repoFiles(cwd)).filter((f) => basename(f) === name && !isTestPath(f));
+  const same = (files ?? repoFiles(cwd, langs)).filter((f) => basename(f) === name && !isTestPath(f));
   return same.length === 1 ? same[0]! : path;
 }
 
 function resolved(opts: ApplyOptions, path: string, existing: boolean): string {
-  const to = resolveBlockPath(opts.cwd, path, existing);
+  const to = resolveBlockPath(opts.cwd, path, existing, undefined, opts.langs);
   if (to !== path)
     logCall({ ts: new Date().toISOString(), session: "", workflow: null, step: "path_resolve", lane: "", model: "", prompt_tokens: 0, cached_tokens: 0, completion_tokens: 0, ms: 0, status: `path ${path} -> ${to}` }, opts.env ?? process.env);
   return to;

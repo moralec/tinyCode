@@ -1,0 +1,27 @@
+FAIL ./math.test.js
+  math
+    ✓ adds two numbers (3 ms)
+    ✕ multiplies two numbers (2 ms)
+
+  ● math › multiplies two numbers
+
+    expect(received).toEqual(expected) // deep equality
+
+    Expected: 6
+    Received: 5
+
+       7 |
+       8 |   test('multiplies two numbers', () => {
+    >  9 |     expect(mul(2, 3)).toEqual(6);
+         |                       ^
+      10 |   });
+      11 | });
+      12 |
+
+      at Object.toEqual (math.test.js:9:23)
+
+Test Suites: 1 failed, 1 total
+Tests:       1 failed, 1 passed, 2 total
+Snapshots:   0 total
+Time:        0.718 s
+Ran all test suites.

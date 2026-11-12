@@ -24,7 +24,7 @@ import { SESSION } from "../llm.ts";
 import { logPath } from "../log.ts";
 import { applyReply, isTestPath, type ApplyResult } from "../protocol/apply.ts";
 import { SYSTEM } from "../protocol/prompts.ts";
-import { failingNames, failureBlocks, firstErrorLine, parseCounts, runTests, type TestCounts, type TestRun } from "../testrun.ts";
+import { failingNames, failureBlocks, firstErrorLine, noCheck, parseCounts, runTests, type Runner, type TestCounts, type TestRun } from "../testrun.ts";
 import { failingTestsCode, fence, fitFixed, fitHead, type Fit, type FitOpts, type QuickHead } from "./quickfit.ts";
 import { runTestGen } from "./testgen.ts";
 
@@ -60,6 +60,8 @@ export interface FixArgs {
   reproduce?: boolean;
   undo: boolean;
   task: string;
+  /** files the caller requires (/build: the task's files): always in the edit step, a missing one as "create if needed" */
+  files?: string[];
 }
 
 /** `[--test PATH] [--undo] <task text>`: flags are read from the front only; the rest is the task. */
@@ -99,12 +101,17 @@ export function undoDir(cwd: string, env: Env = process.env, slot = ""): string 
 }
 
 const SOURCE_EXT = /\.(py|js|ts|sh)$/;
+/** with "ts" on: the other JS/TS extensions too (design languages-and-oracles §3) */
+const SOURCE_EXT_TS = /\.(py|js|ts|sh|mts|cts|mjs|cjs)$/;
+/** a tool's config file (babel.config.js, jest.config.ts): never the source a task is about ("ts" on only) */
+const CONFIG_FILE = /(^|\/)[^/]+\.config\.[^/]+$/;
 /** A test file by its path (tests/ dirs, test_*.py, *_test.*, *.test.*, *.spec.*, conftest.py): one rule, src/protocol/apply.ts */
 export { isTestPath };
 
 /** The one non-test source file of the tree (repoFiles), or null when there are none or several. */
-export function soleSource(cwd: string, test?: string | null): string | null {
-  const src = repoFiles(cwd).filter((f) => SOURCE_EXT.test(f) && f !== test && !isTestPath(f) && !/(^|\/)__init__\.py$/.test(f));
+export function soleSource(cwd: string, test?: string | null, langs: readonly string[] = ["py"]): string | null {
+  const ts = langs.includes("ts");
+  const src = repoFiles(cwd, langs).filter((f) => (ts ? SOURCE_EXT_TS : SOURCE_EXT).test(f) && f !== test && !isTestPath(f) && !/(^|\/)__init__\.py$/.test(f) && !(ts && CONFIG_FILE.test(f)));
   return src.length === 1 ? src[0]! : null;
 }
 
@@ -118,17 +125,23 @@ interface Manifest {
   files: string[];
   /** files present but too big to copy (over MAX_SNAPSHOT_FILE, or past MAX_SNAPSHOT_TOTAL): never rewritten, never removed */
   skipped?: string[];
+  /** config languages the listing used; restore, diff and changed-since list with these, never with today's config,
+   * so turning "ts" on between a snapshot and its undo cannot make undo delete files. Absent (older manifests) = ["py"]. */
+  langs?: string[];
 }
 
-/** Copy every text file of the tree (repoFiles) to the undo dir. Replaces any earlier snapshot of this cwd. */
-export function takeSnapshot(cwd: string, env: Env = process.env, slot = ""): Manifest {
+/** The listing languages a snapshot was taken with (older manifests have none: Python only). */
+const langsOf = (m: Manifest): readonly string[] => m.langs ?? ["py"];
+
+/** Copy every text file of the tree (repoFiles with `langs`, config languages) to the undo dir. Replaces any earlier snapshot of this cwd. */
+export function takeSnapshot(cwd: string, langs: readonly string[], env: Env = process.env, slot = ""): Manifest {
   const dir = undoDir(cwd, env, slot);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(join(dir, "files"), { recursive: true });
   const files: string[] = [];
   const skipped: string[] = [];
   let total = 0;
-  for (const f of repoFiles(cwd)) {
+  for (const f of repoFiles(cwd, langs)) {
     const abs = join(cwd, f);
     let size: number;
     try {
@@ -146,7 +159,7 @@ export function takeSnapshot(cwd: string, env: Env = process.env, slot = ""): Ma
     writeFileSync(dst, readFileSync(abs));
     files.push(f);
   }
-  const manifest: Manifest = { cwd: resolve(cwd), ts: new Date().toISOString(), files, skipped };
+  const manifest: Manifest = { cwd: resolve(cwd), ts: new Date().toISOString(), files, skipped, langs: [...langs] };
   writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
   return manifest;
 }
@@ -180,9 +193,9 @@ export interface RestoreResult {
 }
 
 /** One hash of the tree's non-test text files (path and content), for "the same tree as before" (src/checkpoint.ts). */
-export function treeHash(cwd: string): string {
+export function treeHash(cwd: string, langs: readonly string[]): string {
   const h = createHash("sha1");
-  for (const f of [...repoFiles(cwd)].sort()) {
+  for (const f of [...repoFiles(cwd, langs)].sort()) {
     if (isTestPath(f)) continue;
     try {
       if (statSync(join(cwd, f)).size > MAX_SNAPSHOT_FILE) continue;
@@ -221,7 +234,7 @@ export function restoreSnapshot(cwd: string, env: Env = process.env, slot = "", 
     }
   }
   const was = new Set([...m.files, ...(m.skipped ?? [])]); // a file that existed then is never removed
-  for (const f of repoFiles(cwd)) {
+  for (const f of repoFiles(cwd, langsOf(m))) {
     if (!was.has(f) && !leave?.(f)) {
       rmSync(join(cwd, f), { force: true });
       removed.push(f);
@@ -238,7 +251,7 @@ export function changedSinceSnapshot(cwd: string, env: Env = process.env): strin
   const dir = join(undoDir(cwd, env), "files");
   const out: string[] = [];
   const skipped = new Set(m.skipped ?? []);
-  for (const f of new Set([...m.files, ...repoFiles(cwd)])) {
+  for (const f of new Set([...m.files, ...repoFiles(cwd, langsOf(m))])) {
     if (skipped.has(f)) continue; // too big to compare: not reported as changed
     let have: Buffer;
     try {
@@ -265,7 +278,7 @@ export function snapshotDiff(cwd: string, env: Env = process.env): string {
   if (!m) return "";
   const dir = join(undoDir(cwd, env), "files");
   const out: string[] = [];
-  const names = new Set([...m.files, ...repoFiles(cwd)]);
+  const names = new Set([...m.files, ...repoFiles(cwd, langsOf(m))]);
   for (const f of [...names].sort()) {
     const read = (p: string) => {
       try {
@@ -346,9 +359,14 @@ function formatFailed(res: ApplyResult): string {
 /**
  * `a` is a strictly better test result than `b`: more tests pass, or as many pass and fewer fail with no test lost
  * (a tree that no longer imports reports 1 error out of 1, which is not better than 10 failing out of 10).
+ * All green beats any tree with a failure: two runs of different scope (one test file, the whole suite) are not counts
+ * to compare, and a passing tree must never be put back for a failing one (affine-cipher on the TS gate).
  */
-export const better = (a: TestCounts, b: TestCounts): boolean =>
-  a.passed > b.passed || (a.passed === b.passed && a.failed < b.failed && a.passed + a.failed >= b.passed + b.failed);
+export const better = (a: TestCounts, b: TestCounts): boolean => {
+  const green = (c: TestCounts) => c.failed === 0 && c.passed > 0;
+  if (green(a) !== green(b)) return green(a);
+  return a.passed > b.passed || (a.passed === b.passed && a.failed < b.failed && a.passed + a.failed >= b.passed + b.failed);
+};
 
 /**
  * What the model is told, once, when the ladder's best tree is kept: the counts, the still-failing tests (at most
@@ -453,6 +471,8 @@ export interface FixResult {
   handoff: string | null;
   /** when the ladder's best tree was kept for rung 3 instead of the original: what the model is told (else null) */
   kept?: string | null;
+  /** set when no test command could be found (testrun.ts checkFor): the reason; nothing ran */
+  none?: string;
   lines: string[];
 }
 
@@ -517,7 +537,7 @@ async function reproduceFirst(args: FixArgs, deps: FixDeps): Promise<{ args: Fix
     deps.report(l);
   };
   deps.progress?.step("reproduce");
-  takeSnapshot(deps.cwd, env); // undone if the test passes; runLadder keeps it as the `/fix --undo` copy
+  takeSnapshot(deps.cwd, deps.config.languages, env); // undone if the test passes; runLadder keeps it as the `/fix --undo` copy
   const r = await runTestGen(
     { expectFail: true, fresh: true, task: `a test that reproduces this bug (it must fail while the bug is there): ${args.task}` },
     { cwd: deps.cwd, config: deps.config, chat: deps.chat, report: say, env, runTests: deps.runTests, lint: deps.lint },
@@ -542,6 +562,12 @@ async function reproduceFirst(args: FixArgs, deps: FixDeps): Promise<{ args: Fix
 }
 
 export async function runFix(args: FixArgs, deps: FixDeps): Promise<FixResult> {
+  // no check to run (design languages-and-oracles §1.4): stop before any model call, with the reason
+  const none = args.undo ? null : noCheck(deps.cwd, args.test ? normpath(args.test) : undefined, deps.config.languages, deps.config.test);
+  if (none) {
+    deps.report(none);
+    return { solvedBy: "none", calls: 0, direct: 0, piTurns: 0, diagnosis: null, handoff: null, none, lines: [none] };
+  }
   let repro: { calls: number; lines: string[] } | null = null;
   if (!args.test && !args.undo && args.reproduce !== false && args.task && !deps.keepUndo) {
     const r = await reproduceFirst(args, deps);
@@ -610,19 +636,21 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
   };
   const call = async (step: string, msgs: Message[], opts: ChatOptions = {}): Promise<string> => (await callR(step, msgs, opts)).text;
   let lastRaw = "";
+  let lastRunner: Runner | undefined;
   const runTest = async (): Promise<TestRun> => {
-    const t = await tests({ cwd, test, config: cfg.test });
+    const t = await tests({ cwd, test, config: cfg.test, langs: cfg.languages });
     lastRaw = t.raw ?? "";
+    lastRunner = t.runner;
     return t;
   };
-  const countsOf = (t: TestRun): TestCounts | null => t.counts ?? parseCounts(t.text);
+  const countsOf = (t: TestRun): TestCounts | null => t.counts ?? parseCounts(t.text, t.runner);
   /** the original tree's test counts, and the best tree a rung left (kept for rung 3 when it beats the original) */
   let orig: TestCounts | null = null;
   let best: { rung: number | string; counts: TestCounts; text: string } | null = null;
   const noteAttempt = (rung: number | string, t: TestRun): void => {
     const c = countsOf(t);
     if (!c || !orig || !better(c, best?.counts ?? orig)) return;
-    takeSnapshot(cwd, env, BEST_SLOT);
+    takeSnapshot(cwd, cfg.languages, env, BEST_SLOT);
     best = { rung, counts: c, text: t.text };
   };
   let started: "ladder" | "pi" = "ladder";
@@ -664,7 +692,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
   };
   const protectedPaths = test ? [test] : [];
   const trunk = trunkModel(cfg);
-  takeSnapshot(cwd, env); // before the first write: `/fix --undo` restores this
+  takeSnapshot(cwd, cfg.languages, env); // before the first write: `/fix --undo` restores this
 
   let diag: string | null = null;
   let msgs: Message[] = [];
@@ -672,18 +700,27 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
   let out = "";
   let skipToPi: string | null = null;
 
+  // A fix is solved only when a failing check turns green. A check that already passes before any change cannot show
+  // a fix: stop with the reason, never report it solved (fix-6, 2026-11-11: no reproduction was written, the suite was
+  // green from the start, and one empty Pi turn was reported as "solved by pi").
+  const first = await runTest(); // also the original tree's count, for deciding what rung 3 starts from
+  if (first.ok) {
+    const why = `nothing failing to fix: ${test ?? "the tests"} already ${test ? "passes" : "pass"} before any change, so a fix here could not be checked. Write a test that fails while the bug is there, then fix it.`;
+    say(why);
+    return { solvedBy: "none", calls: direct, direct, piTurns: 0, diagnosis: null, handoff: null, none: why, lines };
+  }
+  orig = countsOf(first);
+
   const plan = decide(cfg.ladder.mode, cfg.ladder.adaptive, trunk, readRuns(env));
   if (plan.start === "pi") {
     started = "pi";
     skipToPi = `rungs 1-2 skipped (Adaptive Ladder: ${plan.why}, ${plan.solved}/${plan.runs} rung 1-2 solves)`;
   } else {
-    // ---- rung 1
-    const first = await runTest(); // also the original tree's count, for deciding what rung 3 starts from
-    orig = countsOf(first);
+    // ---- rung 1 (the check already ran once above: `first`)
     const shownTest = test && isFile(cwd, test) ? test : null;
     const failing = failingNames(first.text, 10_000);
     const qh: QuickHead = {
-      outline: outline(cwd),
+      outline: outline(cwd, undefined, cfg.languages),
       test: shownTest ? { path: shownTest, text: readFileSync(join(cwd, shownTest)).toString("utf8") } : null,
       // every failing name, or none: a list cut short would leave failing tests out of the shrunk test file
       failing: shownTest && orig && failing.total >= orig.failed ? failing.names : [],
@@ -693,7 +730,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
     const sys: Message = { role: "system", content: SYSTEM };
     pg.step("pick files");
     // one source file and its tests (an Exercism exercise): no pick call, that file is the pick (dot-dsl 16k: 5 s saved)
-    const only = lad.skipSolePick ? soleSource(cwd, test) : null;
+    const only = lad.skipSolePick ? soleSource(cwd, test, cfg.languages) : null;
     // the pick call needs the outline: the rest of its prompt shrinks to fit, the outline never
     const pickFit = only ? null : fitHead(qh, (h) => [sys, { role: "user", content: h }], fitOpts("pick", cfg.limits.maxTokens.pick ?? 300, true));
     let raw = "";
@@ -713,6 +750,8 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
     } catch {
       picked = [];
     }
+    // the caller's files first, then the pick: /build's task file must be offered even when the pick chose another
+    if (args.files?.length) picked = [...new Set([...args.files.map(normpath), ...picked])].slice(0, 5);
     const have = picked.filter((p) => isFile(cwd, p));
     if (!skipToPi) say(`picked: ${JSON.stringify(picked)}`);
     const missing = [...new Set(picked.filter((p) => !have.includes(p)))].sort();
@@ -739,7 +778,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
       pg.step("edit");
       const r1 = await callR("edit", msgs, { maxTokens: editFit.maxTokens });
       reply = r1.text;
-      let res = await applyReply(reply, { cwd, protected: protectedPaths, env });
+      let res = await applyReply(reply, { cwd, protected: protectedPaths, env, langs: cfg.languages });
       for (const f of res.applied) pg.touch(String(f));
       let t = await runTest();
       out = t.text;
@@ -754,7 +793,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
       // ---- rung 2
       if (lad.rung2) {
         pg.step("review");
-        diag = await reviewCall(out, lastRaw, workingDiff(cwd, env), cwd, call, lad);
+        diag = await reviewCall(out, lastRaw, workingDiff(cwd, env), cwd, call, lad, lastRunner, cfg.languages);
         say(`review: ${JSON.stringify(diag)}`);
         msgs.push(
           { role: "assistant", content: reply },
@@ -769,7 +808,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
         );
         pg.step("second edit");
         reply = await call("edit", msgs);
-        res = await applyReply(reply, { cwd, protected: protectedPaths, env });
+        res = await applyReply(reply, { cwd, protected: protectedPaths, env, langs: cfg.languages });
         for (const f of res.applied) pg.touch(String(f));
         t = await runTest();
         out = t.text;
@@ -810,7 +849,7 @@ async function runLadder(args: FixArgs, deps: FixDeps): Promise<FixResult> {
           sayFit("rung1b", fit);
           pg.step("second try");
           const r2 = await callR("edit", fit.msgs, { maxTokens: fit.maxTokens, ...(seed !== undefined ? { seed } : {}) });
-          res = await applyReply(r2.text, { cwd, protected: protectedPaths, env });
+          res = await applyReply(r2.text, { cwd, protected: protectedPaths, env, langs: cfg.languages });
           for (const f of res.applied) pg.touch(String(f));
           t = await runTest();
           say(`rung1b: applied ${pyList(res.applied)} failed ${pyList(res.failed)} pass ${t.ok}`);
@@ -887,16 +926,18 @@ async function reviewCall(
   cwd: string,
   call: (step: string, msgs: Message[], opts?: ChatOptions) => Promise<string>,
   lad: Config["ladder"],
+  runner?: Runner,
+  langs: readonly string[] = ["py"],
 ): Promise<string> {
   const files = diffFiles(diff).filter((p) => isFile(cwd, p));
-  const blocks = failureBlocks(rawOut, lad.reviewFailBlocks, 12);
+  const blocks = failureBlocks(rawOut, lad.reviewFailBlocks, 12, runner);
   const shown = files.map((p) => `${p} (current, complete)\n\`\`\`\n${numberedFile(readFileSync(join(cwd, p), "utf8"), lad.reviewFileLines)}\n\`\`\``);
   const parts = [`Test output:\n${testOut}`];
   if (blocks) parts.push(`Failing assertions:\n${blocks}`);
   parts.push(shown.length ? `Files changed (current code):\n${shown.join("\n\n")}` : `Diff tried:\n${cutWithMarker(diff, lad.reviewDiffChars) || "(no change was applied)"}`);
   if (lad.reviewOutlineChars > 0) {
     const names = (testOut.match(/[A-Za-z_][\w/.]*\.py|[A-Za-z_]\w{3,}/g) ?? []).slice(0, 30).join(" ");
-    parts.push(`Outline:\n${evidence(cwd, names, { hitsCap: 0, outlineCap: lad.reviewOutlineChars }).outline}`);
+    parts.push(`Outline:\n${evidence(cwd, names, { hitsCap: 0, outlineCap: lad.reviewOutlineChars, langs }).outline}`);
   }
   const text = await call(
     "review",

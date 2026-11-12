@@ -20,6 +20,7 @@ import {
   approxTokens,
   contextTokens,
   oversizeReason,
+  oversizeLinesReason,
   readCutMarker,
   tailText,
   toolCallVerdict,
@@ -27,6 +28,8 @@ import {
   type Msg,
 } from "../../src/limits.ts";
 import { DEFAULTS } from "../../src/config.ts";
+import { planCallIds } from "../../src/limits.ts";
+import { asToolTurn, CUSTOM_RESULT } from "../../src/orchestrate.ts";
 
 interface Fixture {
   source: string;
@@ -666,4 +669,230 @@ test("pressure: ceilingTokens lowers the line below pressureAt x window (Pi's cl
   assert.ok(capped.apply(msgs, { windowTokens: window, systemChars: 0, ceilingTokens: Math.floor(tokens * 0.8) }), "over the ceiling: fires");
   assert.equal(capped.pressureBatches, 1);
   assert.equal(new Masker(1e9, 2, 0.7, 400).apply(msgs, { windowTokens: window, systemChars: 0, ceilingTokens: tokens * 10 }), undefined, "a high ceiling changes nothing");
+});
+
+// ---- loop guards 2 (docs/designs/loop-guards-2/design.md)
+
+const masked = (ms: Msg[] | undefined, id: string): boolean =>
+  String(((ms?.find((x) => x.toolCallId === id)?.content as { text: string }[]) ?? [{ text: "" }])[0].text).startsWith("[masked");
+const logRows = (env: { TINYCODE_LOG: string }): { step: string; status: string }[] => {
+  try {
+    return readFileSync(env.TINYCODE_LOG, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  } catch {
+    return [];
+  }
+};
+
+test("E28: stepped back with stepBackKeepsMasks, mask() returns the earlier view; off, undefined; no new batch while stepped", () => {
+  for (const on of [true, false]) {
+    const env = tmpEnv();
+    const lim = createLimits({ ...DEFAULTS.limits, stepBackKeepsMasks: on }, "t-e28", env);
+    assert.ok(masked(lim.mask(convo(8, 1000)), "c1"), "a batch before the step-back");
+    const batches = lim.masker.batches;
+    lim.stepBack("test");
+    const after = lim.mask(convo(14, 1000));
+    if (on) {
+      assert.ok(masked(after, "c1"), "kept");
+      assert.ok(!masked(after, "c9"), "no new mask after the step-back");
+    } else assert.equal(after, undefined);
+    lim.mask(convo(15, 1000));
+    assert.equal(lim.masker.batches, batches, "no new batch while stepped back");
+    const shadow = logRows(env).filter((r) => /step_back_keeps_masks/.test(r.step));
+    assert.equal(shadow.length, 1, "one line per run");
+    assert.equal(shadow[0].step, on ? "step_back_keeps_masks" : "would_step_back_keeps_masks");
+    assert.match(shadow[0].status, /^\d+ tokens kept masked/);
+  }
+});
+
+test("E28: the backstop measures the sent list: with the key on, an unmasked list over the line whose kept view is under it makes no batch", () => {
+  const msgs = convo(8, 1000);
+  const usable = 4500;
+  const run = (on: boolean) => {
+    const lim = createLimits({ ...DEFAULTS.limits, stepBackKeepsMasks: on }, "t-e28b", tmpEnv());
+    lim.mask(convo(8, 1000));
+    lim.stepBack("test");
+    const kept = lim.mask(msgs);
+    const before = lim.masker.batches;
+    const out = lim.backstop(msgs, kept, usable, { windowTokens: 16384, systemChars: 0 });
+    return { kept, out, batches: lim.masker.batches - before };
+  };
+  assert.ok(contextTokens(msgs, 0, true) > usable);
+  const on = run(true);
+  assert.ok(contextTokens(on.kept as Msg[], 0, true) < usable, "the kept view fits");
+  assert.equal(on.batches, 0, "no batch: what is sent is under the line");
+  assert.equal(on.out, on.kept);
+  const off = run(false);
+  assert.equal(off.kept, undefined);
+  assert.ok(masked(off.out, "c1"), "off: the unmasked list is over the line, so the backstop masks (today's behaviour)");
+});
+
+/** user, plan call + result (id p1), then `extra` bash turns. */
+function planConvo(extra = 0, planId = "p1"): Msg[] {
+  const msgs: Msg[] = [
+    { role: "user", content: "build me a todo app" },
+    { role: "assistant", timestamp: 1, content: [{ type: "toolCall", id: planId, name: "plan", arguments: { intent: "plan it", request: "a todo app\nwith tags" } }] },
+    { role: "toolResult", toolCallId: planId, toolName: "plan", content: [{ type: "text", text: "1. models\n2. cli\n3. tests\nSTATUS: done" }] },
+  ];
+  for (let i = 0; i < extra; i++) {
+    msgs.push({ role: "assistant", timestamp: 10 + i, content: [{ type: "toolCall", id: `b${i}`, name: "bash", arguments: { command: `ls ${i}` } }] });
+    msgs.push({ role: "toolResult", toolCallId: `b${i}`, toolName: "bash", content: [{ type: "text", text: "ok" }] });
+  }
+  return msgs;
+}
+const argsOf = (ms: Msg[], id: string): Record<string, unknown> =>
+  ((ms.find((m) => m.role === "assistant" && (m.content as { id?: string }[]).some((p) => p.id === id))?.content as { id?: string; arguments: Record<string, unknown> }[]).find((p) => p.id === id) as { arguments: Record<string, unknown> }).arguments;
+
+test("E27 rule 3: retire(ids) masks the plan's result and call arguments, whatever their length, and unprotects them", () => {
+  const msgs = planConvo(1);
+  assert.ok(workingSet(msgs).has("p1"), "the latest plan result is in the working set");
+  assert.ok(!workingSet(msgs, 3, new Set(["p1"])).has("p1"), "retired: not protected");
+  const m = new Masker(1500, 2);
+  assert.equal(m.apply(msgs), undefined, "short: nothing to mask");
+  assert.deepEqual(m.retire(msgs, ["p1"], "the plan is in .tinycode/plan.json"), ["p1"]);
+  const out = m.view(msgs);
+  const res = (out.find((x) => x.toolCallId === "p1")?.content as { text: string }[])[0].text;
+  assert.equal(res, "[masked: plan, 4 lines; the plan is in .tinycode/plan.json]");
+  assert.deepEqual(argsOf(out, "p1"), { intent: "[masked: 1 lines; the plan is in .tinycode/plan.json]", request: "[masked: 2 lines; the plan is in .tinycode/plan.json]" });
+  assert.deepEqual(argsOf(out, "b0"), { command: "ls 0" }, "other calls untouched");
+  assert.deepEqual(m.retire(msgs, ["p1"], "x"), [], "once only");
+});
+
+test("E27 rule 3: plan, then build, then plan again: the second plan result is served; off, nothing is retired and the shadow line is logged", () => {
+  const env = tmpEnv();
+  const lim = createLimits({ ...DEFAULTS.limits, retirePlan: true }, "t-retire", env);
+  const msgs = planConvo(2);
+  // a build call that tool_call refuses never reaches runBuildTracked, so retirePlan is not called: the plan is served
+  assert.ok(!masked(lim.mask(msgs) ?? msgs, "p1"), "a refused build retires nothing");
+  assert.deepEqual(lim.retirePlan(msgs), ["p1"]);
+  assert.ok(masked(lim.mask(msgs), "p1"));
+  const later: Msg[] = [
+    ...msgs,
+    { role: "assistant", timestamp: 99, content: [{ type: "toolCall", id: "p2", name: "plan", arguments: { intent: "again", request: "more" } }] },
+    { role: "toolResult", toolCallId: "p2", toolName: "plan", content: [{ type: "text", text: "1. more\nSTATUS: done" }] },
+  ];
+  const out = lim.mask(later);
+  assert.ok(masked(out, "p1"));
+  assert.ok(!masked(out, "p2"), "a later plan call is served until the next /build");
+  assert.ok(workingSet(later, 3, lim.masker.retiredIds).has("p2"), "and it is the plan in the working set");
+  assert.deepEqual(lim.retirePlan(later), ["p2"], "the next /build retires it");
+  const rows = logRows(env).filter((r) => /retire_plan/.test(r.step));
+  assert.deepEqual(rows.map((r) => r.step), ["retire_plan", "retire_plan"]);
+  assert.match(rows[0].status, /^1 plan call\(s\), ~\d+ tokens$/);
+  // off: the list is untouched and the shadow line says what would have been retired
+  const env2 = tmpEnv();
+  const off = createLimits(DEFAULTS.limits, "t-retire-off", env2);
+  assert.deepEqual(off.retirePlan(msgs), []);
+  assert.equal(off.mask(msgs), undefined, "nothing masked");
+  assert.deepEqual(logRows(env2).map((r) => r.step), ["would_retire_plan"]);
+  // stepped back: a retire does nothing
+  const st = createLimits({ ...DEFAULTS.limits, retirePlan: true }, "t-retire-st", tmpEnv());
+  st.stepBack("test");
+  assert.deepEqual(st.retirePlan(msgs), []);
+});
+
+test("E27 rule 3: a direct-run /plan result (turned into a plan tool turn by asToolTurn, as in every stage-round run) is retired too", () => {
+  const custom = {
+    role: "custom",
+    customType: CUSTOM_RESULT,
+    content: "[result of the plan tool, run by tinyCode]\n1. models\n2. cli\nSTATUS: done",
+    display: false,
+    details: { id: "tc_direct_plan1", tool: "plan", params: { request: "a todo app" }, say: "Planning it.", status: "done" },
+    timestamp: 5,
+  };
+  const raw = [{ role: "user", content: "plan a todo app" }, custom, { role: "user", content: "now build it" }] as Msg[];
+  // the context handler turns the custom result into an assistant call plus its result, and keeps that list for retirePlan
+  const turned = asToolTurn(raw as never, { id: "m", provider: "p", api: "a" }) as Msg[];
+  assert.deepEqual(planCallIds(turned), ["tc_direct_plan1"]);
+  const lim = createLimits({ ...DEFAULTS.limits, retirePlan: true }, "t-retire-direct", tmpEnv());
+  assert.deepEqual(lim.retirePlan(turned), ["tc_direct_plan1"]);
+  const out = lim.mask(turned) as Msg[];
+  assert.equal((out.find((m) => m.toolCallId === "tc_direct_plan1")?.content as { text: string }[])[0].text, "[masked: plan, 3 lines; the plan is in .tinycode/plan.json]");
+  assert.deepEqual(argsOf(out, "tc_direct_plan1"), { intent: "[masked: 1 lines; the plan is in .tinycode/plan.json]", request: "[masked: 1 lines; the plan is in .tinycode/plan.json]" });
+});
+
+test("E27 rule 2: freshServeLines 150 serves a 120-line fresh file whole and cuts a 200-line one; off, freshFileLines decides; checkpoint kept files unchanged", () => {
+  const lines: Record<string, number> = { "/w/small.py": 120, "/w/mid.py": 200 };
+  const env = { resolvePath: (p: string) => `/w/${p}`, windowHash: () => "h", lineCount: (p: string) => lines[p] ?? -1 };
+  const read = (limits: typeof DEFAULTS.limits, lim: ReturnType<typeof createLimits>, path: string) => {
+    lim.fresh.add(`/w/${path}`);
+    const input: Record<string, unknown> = { path };
+    return { v: toolCallVerdict(lim, limits, "read", input, env), input };
+  };
+  const on = { ...DEFAULTS.limits, freshServeLines: 150 };
+  const e1 = tmpEnv();
+  const lim = createLimits(on, "t-fsl", e1);
+  assert.deepEqual(read(on, lim, "small.py").v, { action: "allow", whole: true });
+  const mid = read(on, lim, "mid.py");
+  assert.deepEqual(mid.v, { action: "allow" });
+  assert.equal(mid.input.limit, DEFAULTS.limits.viewLines, "over the line: the 100-line view (readCutMarker says the file continues)");
+  assert.deepEqual(logRows(e1).map((r) => r.step), ["fresh_serve_cut"]);
+  // off: today's rule (freshFileLines 300) serves both whole; the shadow line counts the one the arm would cut
+  const e2 = tmpEnv();
+  const off = createLimits(DEFAULTS.limits, "t-fsl-off", e2);
+  assert.deepEqual(read(DEFAULTS.limits, off, "small.py").v, { action: "allow", whole: true });
+  assert.deepEqual(read(DEFAULTS.limits, off, "mid.py").v, { action: "allow", whole: true });
+  assert.deepEqual(logRows(e2).map((r) => r.step), ["would_fresh_serve_cut"]);
+  // checkpoints keep reading freshFileLines for their kept files
+  const src = readFileSync(new URL("../../extensions/tinycode/index.ts", import.meta.url), "utf8");
+  assert.ok(src.includes("maxFileLines: cfg.limits.freshFileLines,"));
+});
+
+test("E24: a shell test command gets a timeout when it has none, keeps its own, and still gets one after a step-back; other commands and 0 = untouched", () => {
+  const lim = createLimits(DEFAULTS.limits, "t-e24", tmpEnv());
+  const e = { ...env(), testSeconds: () => 120 };
+  const call = (name: string, input: Record<string, unknown>, ce: typeof e | ReturnType<typeof env> = e) => (toolCallVerdict(lim, DEFAULTS.limits, name, input, ce), input);
+  assert.equal(call("bash", { command: "cd sub && npm test 2>&1" }).timeout, 120);
+  assert.equal(call("powershell", { command: "npm test" }).timeout, 120, "PowerShell is the shell too");
+  assert.equal(call("bash", { command: "pytest -q", timeout: 600 }).timeout, 600, "the model's own timeout stays");
+  assert.equal("timeout" in call("bash", { command: "ls -la" }), false, "not a test command");
+  assert.equal("timeout" in call("bash", { command: "pytest" }, env()), false, "no testSeconds (key off): untouched");
+  assert.equal("timeout" in call("bash", { command: "pytest" }, { ...env(), testSeconds: () => 0 }), false, "0 = off");
+  lim.stepBack("test");
+  assert.equal(call("bash", { command: "python3 -m pytest" }).timeout, 120, "kept after the step-back (rule 14 as amended)");
+});
+
+const script = (n: number, tag = "x") => Array.from({ length: n }, (_, i) => `console.log("${tag}", ${i});`).join("\n");
+
+test("E23: refusal lines for bash, powershell and write; 0 = off", () => {
+  assert.deepEqual(oversizeLinesReason("bash", { command: script(77) }, 40, 150), { reason: "bash command 77 lines, over 40. Write the script to a file, then run it.", what: "long bash command, 77 lines" });
+  assert.equal(oversizeLinesReason("powershell", { command: script(41) }, 40, 150)?.reason, "powershell command 41 lines, over 40. Write the script to a file, then run it.");
+  assert.equal(oversizeLinesReason("write", { path: "a.py", content: `${script(347)}\n` }, 40, 150)?.reason, "write 347 lines, over 150. Write up to 150 lines, then add the rest with edit.");
+  assert.equal(oversizeLinesReason("bash", { command: script(40) }, 40, 150), null, "at the line: served");
+  assert.equal(oversizeLinesReason("bash", { command: script(77) }, 0, 150), null, "0 = off");
+  assert.equal(oversizeLinesReason("write", { content: script(400) }, 40, 0), null, "0 = off");
+  assert.equal(oversizeLinesReason("edit", { edits: [{ oldText: "a", newText: script(400) }] }, 40, 150), null, "edits are C6's");
+});
+
+test("E23: the same long call sent twice: the second is served with a tail line; 3rd to 5th refusals are interventions and step back; off once stepped back", () => {
+  const limits = { ...DEFAULTS.limits, bashMaxLines: 40, writeMaxLines: 150 };
+  const e = tmpEnv();
+  const lim = createLimits(limits, "t-e23", e);
+  const bash = (cmd: string) => toolCallVerdict(lim, limits, "bash", { command: cmd }, env());
+  const v1 = bash(script(41));
+  assert.equal(v1.action, "block");
+  assert.equal(lim.interventions, 0, "the first refusals are free");
+  assert.deepEqual(bash(script(41)), { action: "allow" }, "the same call again is served");
+  assert.deepEqual(lim.tailNotes, ["served: long bash command, 41 lines"]);
+  // 5 different long scripts: the 2nd is free, the 3rd to 5th count, and stepBackAt 3 steps back at the 5th
+  assert.equal(bash(script(50, "a")).action, "block");
+  assert.equal(lim.interventions, 0);
+  assert.equal(bash(script(50, "b")).action, "block");
+  assert.equal(lim.interventions, 1);
+  assert.equal(bash(script(50, "c")).action, "block");
+  assert.equal(lim.interventions, 2);
+  assert.equal(lim.stepped, false);
+  assert.equal(bash(script(50, "d")).action, "block");
+  assert.equal(lim.stepped, true, "3 interventions: stepped back");
+  assert.match(lim.stepBackReason as string, /long action/);
+  assert.deepEqual(bash(script(50, "e")), { action: "allow" }, "stepped back: E23 is off");
+  assert.equal(logRows(e).filter((r) => r.step === "long_action").length, 5);
+  // 0 = off: served, with the shadow line at the arm values (2 x scriptLines = 40, 150)
+  const e2 = tmpEnv();
+  const off = createLimits(DEFAULTS.limits, "t-e23-off", e2);
+  assert.deepEqual(toolCallVerdict(off, DEFAULTS.limits, "bash", { command: script(77) }, env()), { action: "allow" });
+  assert.deepEqual(toolCallVerdict(off, DEFAULTS.limits, "bash", { command: script(77) }, env()), { action: "allow" });
+  assert.deepEqual(toolCallVerdict(off, DEFAULTS.limits, "write", { path: "a", content: script(151) }, env()), { action: "allow" });
+  assert.deepEqual(toolCallVerdict(off, DEFAULTS.limits, "bash", { command: script(39) }, env()), { action: "allow" });
+  assert.deepEqual(logRows(e2).map((r) => r.step), ["would_long_action", "would_long_action"], "one per distinct call");
+  assert.deepEqual(off.tailNotes, []);
 });

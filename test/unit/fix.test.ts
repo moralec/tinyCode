@@ -191,7 +191,7 @@ test("undo with no snapshot says so", () => {
 test("restore removes files the ladder created and the directory it made", () => {
   const f = fixture("t01-rung1");
   const { cwd, env } = setup(f);
-  takeSnapshot(cwd, env);
+  takeSnapshot(cwd, ["py"], env);
   mkdirSync(join(cwd, "core/__pycache__"), { recursive: true });
   writeFileSync(join(cwd, "core/currency.py"), "x = 1\n");
   writeFileSync(join(cwd, "pager.py"), "changed\n");
@@ -206,7 +206,7 @@ test("restore never removes a file too big to snapshot (it existed before)", () 
   const { cwd, env } = setup(f);
   const big = '{"x": "' + "a".repeat(2_100_000) + '"}\n';
   writeFileSync(join(cwd, "data.json"), big);
-  takeSnapshot(cwd, env);
+  takeSnapshot(cwd, ["py"], env);
   writeFileSync(join(cwd, "pager.py"), "changed\n");
   const r = restoreSnapshot(cwd, env);
   assert.deepEqual(r, { restored: ["pager.py"], removed: [] });
@@ -353,6 +353,10 @@ test("better: more passing wins; fewer failing only counts when no test was lost
   assert.equal(better({ passed: 0, failed: 9 }, { passed: 0, failed: 10 }), false); // a test went missing
   assert.equal(better({ passed: 2, failed: 3 }, { passed: 2, failed: 4 }), false); // a test went missing
   assert.equal(better({ passed: 4, failed: 6 }, { passed: 4, failed: 6 }), false);
+  // all green beats any failing tree, whatever the counts: runs of different scope do not compare (TS gate affine-cipher)
+  assert.equal(better({ passed: 16, failed: 0 }, { passed: 28, failed: 4 }), true);
+  assert.equal(better({ passed: 28, failed: 4 }, { passed: 16, failed: 0 }), false);
+  assert.equal(better({ passed: 0, failed: 0 }, { passed: 1, failed: 4 }), false); // nothing ran is not green
 });
 
 // ---- F8: a cut diff says it is cut
@@ -488,4 +492,108 @@ test("soleSource: tests, conftest and __init__ do not count; two sources or none
   assert.equal(soleSource(tmpDir("tinycode-sole-empty-")), null);
   assert.equal(DEFAULTS.ladder.skipSolePick, true);
   assert.throws(() => mergeConfig({ ladder: { skipSolePick: "yes" } }), /skipSolePick/);
+});
+
+test("/fix with no test command (a JS-only repo, \"ts\" off) stops before any model call, with the reason", async () => {
+  const d = tmpDir("fix-none-");
+  writeFileSync(join(d, "package.json"), JSON.stringify({ scripts: { test: "jest" } }));
+  writeFileSync(join(d, "a.js"), "module.exports = 1;\n");
+  let chats = 0;
+  const r = await runFix(parseFixArgs("fix it"), { cwd: d, config: cfg({ languages: ["py"] }), chat: async () => { chats++; throw new Error("no call expected"); }, report: () => {} });
+  assert.equal(chats, 0);
+  assert.equal(r.solvedBy, "none");
+  assert.match(r.none ?? "", /"ts" is not in languages/);
+});
+
+test("undo with \"ts\" on: an edited .ts file is restored and a created one removed", () => {
+  const cwd = tmpDir("tinycode-fix-ts-");
+  const env = { TINYCODE_LOG: join(cwd, "..", `s-${Math.random()}`, "calls.jsonl") };
+  writeFileSync(join(cwd, "date.ts"), "export const d = 1;\n");
+  takeSnapshot(cwd, ["py", "ts"], env);
+  writeFileSync(join(cwd, "date.ts"), "export const d = 2;\n");
+  writeFileSync(join(cwd, "date-utils.ts"), "export const u = 1;\n");
+  assert.deepEqual(restoreSnapshot(cwd, env), { restored: ["date.ts"], removed: ["date-utils.ts"] });
+  assert.equal(readFileSync(join(cwd, "date.ts"), "utf8"), "export const d = 1;\n");
+});
+
+test("undo lists files with the snapshot's languages: \"ts\" turned on after a [\"py\"] snapshot removes no .ts file (CUJ 5)", () => {
+  const cwd = tmpDir("tinycode-fix-ts-");
+  const env = { TINYCODE_LOG: join(cwd, "..", `s-${Math.random()}`, "calls.jsonl") };
+  writeFileSync(join(cwd, "app.py"), "x = 1\n");
+  writeFileSync(join(cwd, "src.ts"), "export const s = 1;\n");
+  takeSnapshot(cwd, ["py"], env);
+  writeFileSync(join(cwd, "app.py"), "x = 2\n");
+  // restoreSnapshot takes no languages: it reads the manifest's, whatever the config says now
+  assert.deepEqual(restoreSnapshot(cwd, env), { restored: ["app.py"], removed: [] });
+  assert.ok(existsSync(join(cwd, "src.ts")));
+});
+
+test("a manifest written before languages existed reads as [\"py\"]", () => {
+  const cwd = tmpDir("tinycode-fix-ts-");
+  const env = { TINYCODE_LOG: join(cwd, "..", `s-${Math.random()}`, "calls.jsonl") };
+  writeFileSync(join(cwd, "app.py"), "x = 1\n");
+  const m = takeSnapshot(cwd, ["py", "ts"], env);
+  assert.deepEqual(m.langs, ["py", "ts"]);
+  // strip langs from the manifest on disk, as an older tinyCode wrote it
+  const mpath = (() => {
+    const root = join(env.TINYCODE_LOG, "..");
+    const walk = (d: string): string | null => {
+      for (const n of readdirSync(d)) {
+        const p = join(d, n);
+        if (n === "manifest.json") return p;
+        if (statSync(p).isDirectory()) {
+          const got = walk(p);
+          if (got) return got;
+        }
+      }
+      return null;
+    };
+    return walk(root);
+  })();
+  assert.ok(mpath, "manifest written");
+  const old = JSON.parse(readFileSync(mpath!, "utf8"));
+  delete old.langs;
+  writeFileSync(mpath!, JSON.stringify(old));
+  writeFileSync(join(cwd, "made.ts"), "export const m = 1;\n");
+  assert.deepEqual(restoreSnapshot(cwd, env), { restored: [], removed: [] }, "made.ts is not listed under [\"py\"], so it is left");
+});
+
+// fix-6 (bench/matrix, 2026-11-11): no reproduction test was written, the visible suite was green from the start, and
+// the ladder reported "solved by pi" after one empty Pi turn. A fix is only solved when a failing check turns green.
+for (const mode of ["ladder", "pi"] as const) {
+  test(`a check that already passes before any change is not "solved" (ladder.mode ${mode}): it stops with the reason, no model call`, async () => {
+    const f = fixture("r2-03-allfail");
+    const { cwd, env } = setup(f);
+    const before = tree(cwd);
+    let piCalls = 0;
+    const s = scripted(f.replies);
+    const lines: string[] = [];
+    const r = await runFix(parseFixArgs(`--test ${f.test} Fix the invoice.`), {
+      cwd, config: cfg({ ladder: { mode } }), chat: s.chat, report: (l) => lines.push(l), env,
+      pi: async () => { piCalls++; return { turns: 1 }; },
+      runTests: fakeTests(["PASS 10 passed in 0.1s\n"]) as never,
+    });
+    assert.equal(r.solvedBy, "none");
+    assert.match(r.none ?? "", /already pass(es)? before any change/);
+    assert.equal(piCalls, 0, "Pi's loop is not started on a green check");
+    assert.equal(s.calls.length, 0, "no model call");
+    assert.deepEqual(tree(cwd), before, "nothing written");
+    assert.ok(lines.some((l) => /already pass(es)? before any change/.test(l)));
+  });
+}
+
+// /build task 2 (runs-night build-1 r1, 2026-11-11): the task had to create habits/cli.py, the pick chose only the
+// existing habits/__main__.py, so the new file was never offered and the task blocked. Files a caller names are
+// always part of the edit step; a missing one is offered as "create if needed".
+test("files a caller names (args.files) are always in the edit step; a missing one is offered to create", async () => {
+  const f = fixture("r2-03-allfail");
+  const { cwd, env } = setup(f);
+  const s = scripted(f.replies);
+  await runFix({ ...parseFixArgs(`--test ${f.test} Fix the invoice.`), files: ["billing/newmod.py"] }, {
+    cwd, config: cfg({ ladder: { rung2: false, secondTry: false, rung3: false } }), chat: s.chat, report: () => {}, env,
+    runTests: fakeTests([FAIL10]) as never,
+  });
+  const edit = s.calls.find((c) => c.step === "edit");
+  assert.ok(edit, "an edit call was made");
+  assert.match(String(edit!.messages.at(-1)!.content), /\(missing, create if needed: billing\/newmod\.py\)/);
 });

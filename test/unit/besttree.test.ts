@@ -56,7 +56,7 @@ test("best tree with real files: improve, rewrite worse, restore_best puts the b
   const env = { TINYCODE_LOG: join(tmpDir("tc-best-log-"), "c.jsonl") };
   writeFileSync(join(cwd, "bowling.py"), "v1\n");
   const t = new BestTree();
-  t.seed(c(24, 7), () => void takeSnapshot(cwd, env, LOOP_SLOT));
+  t.seed(c(24, 7), () => void takeSnapshot(cwd, ["py"], env, LOOP_SLOT));
   writeFileSync(join(cwd, "bowling.py"), "v2 rewrite\n");
   writeFileSync(join(cwd, "extra.py"), "new\n");
   assert.match(t.observe(c(3, 28), () => assert.fail("worse: no snapshot"))!, /^Worse than best \(24\/31/);
@@ -215,7 +215,7 @@ test("undo with real files: the source comes back, test files are neither restor
   writeFileSync(join(cwd, "dot_dsl.py"), "v1\n");
   writeFileSync(join(cwd, "dot_dsl_test.py"), "t1\n");
   const t = new BestTree(0, 0, true);
-  t.observe(c(11, 1), () => void takeSnapshot(cwd, env, LOOP_SLOT));
+  t.observe(c(11, 1), () => void takeSnapshot(cwd, ["py"], env, LOOP_SLOT));
   writeFileSync(join(cwd, "dot_dsl.py"), "v2\n");
   writeFileSync(join(cwd, "dot_dsl_test.py"), "t2\n");
   writeFileSync(join(cwd, "extra.py"), "new\n");
@@ -251,16 +251,16 @@ test("treeHash: the same for the same non-test files; a source change or a new f
   const cwd = tmpDir("tc-hash-");
   writeFileSync(join(cwd, "dot_dsl.py"), "v1\n");
   writeFileSync(join(cwd, "dot_dsl_test.py"), "t1\n");
-  const h1 = treeHash(cwd);
-  assert.equal(treeHash(cwd), h1);
+  const h1 = treeHash(cwd, ["py"]);
+  assert.equal(treeHash(cwd, ["py"]), h1);
   writeFileSync(join(cwd, "dot_dsl_test.py"), "t2\n");
-  assert.equal(treeHash(cwd), h1, "test files are not part of the tree");
+  assert.equal(treeHash(cwd, ["py"]), h1, "test files are not part of the tree");
   writeFileSync(join(cwd, "dot_dsl.py"), "v2\n");
-  assert.notEqual(treeHash(cwd), h1);
+  assert.notEqual(treeHash(cwd, ["py"]), h1);
   writeFileSync(join(cwd, "dot_dsl.py"), "v1\n");
-  assert.equal(treeHash(cwd), h1, "back to the same content: the same hash");
+  assert.equal(treeHash(cwd, ["py"]), h1, "back to the same content: the same hash");
   writeFileSync(join(cwd, "helper.py"), "x\n");
-  assert.notEqual(treeHash(cwd), h1);
+  assert.notEqual(treeHash(cwd, ["py"]), h1);
 });
 
 test("best tree off (limits.loopBestTree=false): counts and verdicts are tracked, nothing is kept, said or restored", () => {
@@ -294,4 +294,136 @@ test("config: loopBestTree and rewriteNudge default on, take booleans only", () 
     assert.equal(mergeConfig({ limits: { [k]: false } }).limits[k], false);
     assert.throws(() => mergeConfig({ limits: { [k]: "no" } }), new RegExp(`limits\\.${k}: must be true or false`));
   }
+});
+
+test("treeHash with \"ts\": a .ts edit changes the hash; with the default it does not", () => {
+  const cwd = tmpDir("tinycode-hash-ts-");
+  writeFileSync(join(cwd, "a.ts"), "export const a = 1;\n");
+  const ts0 = treeHash(cwd, ["py", "ts"]);
+  const py0 = treeHash(cwd, ["py"]);
+  writeFileSync(join(cwd, "a.ts"), "export const a = 2;\n");
+  assert.notEqual(treeHash(cwd, ["py", "ts"]), ts0);
+  assert.equal(treeHash(cwd, ["py"]), py0);
+});
+
+// ---- E22, start over (docs/designs/loop-guards-2/design.md)
+
+const noop = () => {};
+const OFFER = (p: string) => `Same failure 3 runs (${p}). The design may be wrong: restore_best to=start puts the original files back (tests kept, best tree saved), then rebuild. Or keep fixing.`;
+const TAIL = "Same failure 3 runs: the design may be wrong. restore_best to=start puts the original files back (tests kept, best saved); or report what still fails.";
+const run = (t: BestTree, counts: { passed: number; failed: number } | null, sig: string, o: { restore?: () => unknown; undo?: () => unknown; timedOut?: boolean; taken?: boolean } = {}) =>
+  t.observe(counts, noop, o.restore, { sig, undo: o.undo, timedOut: o.timedOut, startTaken: o.taken ?? true });
+
+test("E22 row: 3 identical signatures offer the original files (the best-setting run counts); 3 different do not; a 0-pass row offers too", () => {
+  const t = new BestTree(0, 0, false, 1, true, true);
+  assert.equal(run(t, c(6, 4), "A"), null, "sets the best, row 1");
+  assert.equal(run(t, c(6, 4), "A"), null);
+  assert.equal(run(t, c(6, 4), "A"), OFFER("6/10"));
+  assert.equal(t.startTrigger, true);
+  const d = new BestTree(0, 0, false, 1, true, true);
+  for (const s of ["A", "B", "C", "D"]) assert.equal(run(d, c(6, 4), s), null);
+  const z = new BestTree(0, 0, false, 1, true, true);
+  assert.equal(run(z, c(0, 10), "Z"), null);
+  assert.equal(run(z, c(0, 10), "Z"), null);
+  assert.equal(run(z, c(0, 10), "Z"), OFFER("0/10"), "0 passing is the clearest wrong-design case");
+});
+
+test("E22 row: a timeout, a run with no counts or a green run resets it; once per request; no offer without the .start snapshot; off = the shadow trigger only", () => {
+  const t = new BestTree(0, 0, false, 1, true, true);
+  run(t, c(6, 4), "A");
+  run(t, c(6, 4), "A");
+  assert.equal(run(t, c(6, 4), "A", { timedOut: true }), null, "a timeout resets");
+  run(t, null, "A");
+  run(t, c(6, 4), "A");
+  run(t, c(6, 4), "A");
+  assert.equal(run(t, c(6, 4), "A"), OFFER("6/10"), "the row counted again from the run after the reset");
+  const g = new BestTree(0, 0, false, 1, true, true);
+  run(g, c(0, 4), "A");
+  run(g, c(0, 4), "A");
+  run(g, c(4, 0), "G");
+  run(g, c(0, 4), "A");
+  assert.doesNotMatch(String(run(g, c(0, 4), "A")), /Same failure/, "a green run reset the row");
+  run(t, c(6, 4), "A");
+  run(t, c(6, 4), "A");
+  assert.equal(run(t, c(6, 4), "A"), null, "once per request");
+  t.reset();
+  run(t, c(6, 4), "A");
+  run(t, c(6, 4), "A");
+  assert.equal(run(t, c(6, 4), "A"), OFFER("6/10"), "a new request may offer again");
+  const n = new BestTree(0, 0, false, 1, true, true);
+  for (let i = 0; i < 4; i++) assert.equal(run(n, c(6, 4), "A", { taken: false }), null, "no .start snapshot in this request: no offer");
+  const off = new BestTree(0, 0, false, 1, true, false);
+  run(off, c(6, 4), "A");
+  run(off, c(6, 4), "A");
+  assert.equal(run(off, c(6, 4), "A"), null, "off: no line");
+  assert.equal(off.startTrigger, true, "but the trigger is met (the shadow line)");
+});
+
+test("E22 with the stuck rule: one combined line on a worse tree (C14 still restores) and on an equal tree; 'Stop' becomes 'or report'", () => {
+  const t = new BestTree(3, 0, false, 1, true, true);
+  let restored = 0;
+  const restore = () => void restored++;
+  run(t, c(6, 4), "X", { restore });
+  run(t, c(5, 5), "B", { restore });
+  run(t, c(5, 5), "B", { restore });
+  assert.equal(run(t, c(5, 5), "B", { restore }), `No progress 3 test runs. Best restored (6/10). ${TAIL}`);
+  assert.equal(restored, 1);
+  const e = new BestTree(3, 0, false, 1, true, true);
+  run(e, c(6, 4), "X");
+  run(e, c(6, 4), "Y", { restore });
+  run(e, c(6, 4), "Y", { restore });
+  assert.equal(run(e, c(6, 4), "Y", { restore }), `No progress 3 test runs (6/10). ${TAIL}`);
+  const off = new BestTree(3, 0, false, 1, true, false);
+  run(off, c(6, 4), "X");
+  run(off, c(6, 4), "Y", { restore });
+  run(off, c(6, 4), "Y", { restore });
+  assert.equal(run(off, c(6, 4), "Y", { restore }), "No progress 3 test runs (6/10). Stop: report what still fails.", "off: today's line");
+});
+
+test("E22 fresh attempt: no 'worse' line, no undo, no C14; 6 failing runs restore the saved best once; a run better than the saved best ends it as a new best", () => {
+  const t = new BestTree(3, 0, true, 1, true, true);
+  let undos = 0;
+  let restored = 0;
+  const o = { undo: () => void undos++, restore: () => void restored++ };
+  run(t, c(6, 4), "A", o);
+  assert.equal(t.startOverText(() => ({}), true), "Original files back (tests kept; best tree 6/10 saved). Rebuild, then run_tests.");
+  assert.equal(t.freshAttempt, true);
+  // the first fresh run is the attempt's own first best; the 6 after it make no progress
+  for (let i = 1; i <= 6; i++) assert.equal(run(t, c(2, 8), "W", o), null, `fresh run ${i}: no line`);
+  assert.equal(undos, 0, "no undo with undoWorse on");
+  assert.equal(restored, 0, "no C14 restore");
+  assert.equal(run(t, c(2, 8), "W", o), "Fresh attempt: no progress in 6 runs (2/10). Best tree back (6/10). Stop: report what still fails.");
+  assert.equal(restored, 1);
+  assert.equal(t.freshAttempt, false);
+  assert.equal(t.lastCounts?.passed, 6, "the saved best is the last tree now");
+  // a better run ends the state as a new best
+  const b = new BestTree(3, 0, true, 1, true, true);
+  let shots = 0;
+  b.observe(c(6, 4), () => void shots++, undefined, { sig: "A", startTaken: true });
+  b.startOver();
+  assert.equal(b.observe(c(3, 7), () => void shots++, undefined, { sig: "F" }), null);
+  assert.equal(b.verdict, "best", "progress inside the fresh attempt still makes milestones");
+  assert.equal(b.observe(c(2, 8), () => void shots++, undefined, { sig: "G" }), null);
+  assert.equal(b.verdict, "worse", "relative to the fresh attempt's own best");
+  assert.equal(b.observe(c(7, 3), () => void shots++, undefined, { sig: "H" }), null);
+  assert.deepEqual([b.freshAttempt, b.best, shots], [false, c(7, 3), 2], "a new best: snapshot, the state ends");
+  assert.match(b.observe(c(5, 5), noop, undefined, { sig: "I" }) as string, /^Worse than best \(7\/10/, "every rule works normally again");
+});
+
+test("E22 fresh attempt: endRestore keeps the saved best as the floor (also with no run since the start-over); to=start needs the snapshot and the key", () => {
+  const t = new BestTree(3, 0, false, 1, true, true);
+  run(t, c(6, 4), "A");
+  t.startOver();
+  let restored = 0;
+  assert.equal(t.endRestore(() => void restored++), "Ended below best: restored best tree (6/10).", "no run yet: the original tree is below the best");
+  const u = new BestTree(3, 0, false, 1, true, true);
+  run(u, c(6, 4), "A");
+  u.startOver();
+  run(u, c(2, 8), "W");
+  assert.equal(u.endRestore(() => ({})), "Ended below best: restored best tree (6/10).");
+  assert.equal(u.freshAttempt, false);
+  assert.equal(new BestTree(3, 0, false, 1, true, true).startOverText(() => ({}), false), "No start snapshot in this request.");
+  assert.equal(new BestTree(3, 0, false, 1, true, true).startOverText(() => null, true), "No snapshot found.");
+  assert.equal(new BestTree(3, 0, false, 1, true, false).startOverText(() => ({}), true), "to=start is off (limits.startOver).");
+  assert.equal(new BestTree(3, 0, false, 1, false, true).startOverText(() => ({}), true), "to=start is off (limits.startOver).", "ignored without loopBestTree");
 });

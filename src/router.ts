@@ -23,6 +23,9 @@ const NAMED_FILE = /(?<![\w/.-])[\w./-]+\.(?:py|ts|tsx|js|mjs|go|rs|java|rb|c|cp
 // A test file name (X_test.py, test_x.py) with a pass/fail verb says the same. Outranks readme, plan and test-writing.
 const TEST_FILE = /(?<![\w/.-])[\w./-]*(?:_test\.py|(?<![\w])test_[\w-]+\.py)\b/gi;
 const PASS_VERB = /\b(pass|passes|passing|passed|fail|fails|failing|failed)\b/;
+// with "ts" in config languages (design languages-and-oracles, addendum 1): JS/TS test names count too
+const JS_TEST_FILE = /(?<![\w/.-])[\w./-]*\.(?:spec|test)\.(?:[cm]?[jt]s|[jt]sx)\b/gi;
+const JS_TEST_PATH = /\.(?:spec|test)\.(?:[cm]?[jt]s|[jt]sx)$/;
 const PASS_ASK = /\b(?:make|get|keep)\s+(?:all\s+|the\s+|these\s+|those\s+|every\s+)*(?:failing\s+|unit\s+)*tests?\s+pass\b|\btests?\b[^.?!\n]{0,80}\bpass(?:es)?\b|\bfix(?:ing)?\s+(?:all\s+|the\s+|these\s+|those\s+)*(?:failing|broken)\s+tests?\b/;
 const PLAN = /\b(build|create|make|write|develop|set up)\s+(me\s+)?(a|an|the|my|some)\b[^.?!]*\b(app|application|tool|script|cli|program|website|site|api|bot|library|service|game|project)\b/;
 // "add/write/implement a new <function|endpoint|option|...>": new code (S14), not a change to existing code.
@@ -140,7 +143,7 @@ function loosePhrases(stem: string): string[] {
   return [`${head} ${last}`, `${head} ${last}s`];
 }
 
-/** {lowercase name: path} for file stems, file names and top-level def/class/CONSTANT names. */
+/** {lowercase name: path} for repo paths, file stems, file names and top-level def/class/CONSTANT names. */
 export function buildIndex(repo: string, files = walk(repo)): RepoIndex {
   const names = new Map<string, string>();
   const put = (k: string, p: string) => {
@@ -151,6 +154,8 @@ export function buildIndex(repo: string, files = walk(repo)): RepoIndex {
     const f = p.slice(p.lastIndexOf("/") + 1);
     const [stem, ext] = splitExt(f);
     if (f.startsWith(".") || stem === "__init__" || stem === "conftest" || stem.startsWith("test_")) continue;
+    // the whole path too: findFile never matches a name right after "/", so "ledger/journal.py" needs its own key
+    if (p !== f) put(p.toLowerCase(), p);
     put(f.toLowerCase(), p);
     if (stem.length >= 4) put(stem.toLowerCase(), p);
     for (const k of loosePhrases(stem)) loose.push([k, p]);
@@ -191,13 +196,13 @@ export interface Route {
 }
 
 /** The fix route for "make the tests pass" (see PASS_ASK): file = the named source file, test = the named test file. */
-function fixTests(text: string, low: string, names: Map<string, string>, files: string[]): Route | null {
-  const tests = [...text.matchAll(TEST_FILE)].map((m) => m[0]);
+function fixTests(text: string, low: string, names: Map<string, string>, files: string[], ts = false): Route | null {
+  const tests = [...text.matchAll(TEST_FILE), ...(ts ? text.matchAll(JS_TEST_FILE) : [])].map((m) => m[0]);
   const testNamed = tests.length > 0 && PASS_VERB.test(low);
   if (!testNamed && !PASS_ASK.test(low)) return null;
   const resolveFile = (n: string): string => files.find((f) => f === n) ?? files.find((f) => f.slice(f.lastIndexOf("/") + 1) === n.slice(n.lastIndexOf("/") + 1)) ?? n;
   const test = tests.length ? resolveFile(tests[0]!) : undefined;
-  const isTest = (p: string) => p === test || /(?:_test\.py|(?:^|\/)test_[^/]*\.py)$/.test(p);
+  const isTest = (p: string) => p === test || /(?:_test\.py|(?:^|\/)test_[^/]*\.py)$/.test(p) || (ts && JS_TEST_PATH.test(p));
   // a file named in the text beats a repo name that merely occurs in the prose
   let file = "";
   for (const m of text.matchAll(new RegExp(NAMED_FILE.source, "gi"))) {
@@ -218,9 +223,9 @@ function stemOnly(low: string, file: string, names: Map<string, string>): boolea
   return true;
 }
 
-export function heuristic(text: string, names: Map<string, string>, files: string[] = [...new Set(names.values())]): Route {
+export function heuristic(text: string, names: Map<string, string>, files: string[] = [...new Set(names.values())], langs: readonly string[] = ["py"]): Route {
   const low = text.toLowerCase();
-  const ft = fixTests(text, low, names, files);
+  const ft = fixTests(text, low, names, files, langs.includes("ts"));
   if (ft) return ft;
   let found = Object.keys(VERBS).filter((w) => VERBS[w]!.test(low));
   if (found.includes("readme")) found = ["readme"];
@@ -256,9 +261,9 @@ export interface Routed extends Route {
   error?: string;
 }
 
-export async function route(text: string, idx: RepoIndex, chat: ChatFn, useModel = true): Promise<Routed> {
+export async function route(text: string, idx: RepoIndex, chat: ChatFn, useModel = true, langs: readonly string[] = ["py"]): Promise<Routed> {
   const t0 = Date.now();
-  const h = heuristic(text, idx.names, idx.files);
+  const h = heuristic(text, idx.names, idx.files, langs);
   let r: Routed = { ...h, source: "code", prompt_tokens: 0, completion_tokens: 0, ms: 0 };
   if (!h.confident && !useModel) r = { ...r, workflow: "none" };
   else if (!h.confident) {

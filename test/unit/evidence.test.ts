@@ -67,3 +67,15 @@ test("parseDiff / gitHunks", () => {
   assert.ok(hs[0].lines.includes("+line TWO"));
   assert.deepEqual(gitHunks(tmpDir("tinycode-nogit-")), []);
 });
+
+test("evidence with \"ts\": a TS file's definitions come from the symbol reader (methods by Class.method); the default keeps the line regex", () => {
+  const d = tmpDir("tinycode-ev-ts-");
+  writeFileSync(
+    join(d, "cart.ts"),
+    "export class Cart {\n  add(x: number): void {\n    return;\n  }\n}\n\nexport const total = (xs: number[]) => xs.length;\n",
+  );
+  const on = evidence(d, "where is add", { langs: ["py", "ts"] }).outline;
+  assert.match(on, /^cart\.ts: Cart, Cart\.add, total$/m);
+  // outside git the default file list has no .ts files at all (as before); "ts" adds them
+  assert.doesNotMatch(evidence(d, "where is add").outline, /cart\.ts/);
+});

@@ -16,17 +16,18 @@ matching [milestone](https://github.com/moralec/tinyCode/milestones).
 - [x] Routing by code only, no extra model call
 - [ ] Three runs per task at 16k on each tested setup (in progress)
 
-## v1.1 — smaller cards
+## v1.1 — every developer task, at 16k and up
 
-**Claim:** works at an 8k window, so 8 GB cards and laptops can run it.
+**Claim:** at a 16k window, tinyCode helps with fixing, changing, building from scratch and research, and is never worse than Pi alone.
 
-- [ ] The same tasks at 8k, Pi alone against tinyCode
-- [ ] Read less: one function instead of a whole file
-- [ ] Test output cut to the failing assertion
+**Dropped 2026-11-10: the 8k target (operator).** An 8k window was v1.1's earlier claim. At 8k, Pi holds back 4096 tokens for every reply, so the prompt has about 4k. A gemma run on the RTX 4000 with four 8k changes no longer died early. It still ran out of context once a single large step had to be kept whole, and Pi's own summary request did not fit an 8k server.
+
+- [ ] Real tasks for every use case: bug fixes, changes across several files, from-scratch builds, research (BACKLOG "Broadening" B3)
+- [ ] Languages beyond Python, and each project's own test and build command (B2)
+- [ ] Read less: one function instead of a whole file; test output cut to the failing assertion
 - [ ] Pi's loop starts with what the quick try already read, instead of reading it again
 - [ ] A second quick try with a fresh sample before Pi's loop (hit-or-miss tasks like connect)
-- [ ] The Adaptive Ladder learns each model's window habits: talkative replies, reasoning in code comments, reply length (#11)
-- [ ] The installer suggests a context window for your card
+- [ ] The Adaptive Ladder learns each model's habits: talkative replies, reasoning in code comments, reply length (#11)
 
 ## v1.2 — bugs described in words
 
@@ -43,5 +44,5 @@ matching [milestone](https://github.com/moralec/tinyCode/milestones).
 
 ## Later, each only with evidence
 
-- [ ] `/explain`, `/review`, `/doc` re-tested on a mid-size project at 8k; used automatically only if they beat plain Pi there
+- [ ] `/explain`, `/review`, `/doc` re-tested on a mid-size project at 16k; used automatically only if they beat plain Pi there
 - [ ] More models and long multi-request sessions

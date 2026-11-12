@@ -1,9 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { run, type Routine } from "./base.ts";
+import { run, runAskedTests, type Routine } from "./base.ts";
 import { atomicWrite, normalizeEolText } from "./util.ts";
-import { runTests } from "../testrun.ts";
 
 /** .py: the file is the text; check = `<python> -m py_compile`, then the configured test when one is given. */
 export const pyRoutine: Routine = {
@@ -22,14 +21,6 @@ export const pyRoutine: Routine = {
     // -I also ignores PYTHON* variables, so the cache prefix goes as -X (Python 3.8+), not PYTHONPYCACHEPREFIX.
     const r = await run(o.python, ["-I", "-X", `pycache_prefix=${join(tmpdir(), "tinycode-pyc")}`, "-m", "py_compile", path], { cwd: o.cwd });
     if (r.code !== 0) return { ok: false, out: `py_compile failed:\n${r.out}`.slice(0, 3200) };
-    if (o.test && (o.test.path || o.test.command)) {
-      const t = await runTests({
-        cwd: o.cwd,
-        test: o.test.path,
-        config: { python: o.python, command: o.test.command },
-      });
-      return { ok: t.ok, out: t.text };
-    }
-    return { ok: true, out: "py_compile ok" };
+    return (await runAskedTests(o)) ?? { ok: true, out: "py_compile ok" };
   },
 };

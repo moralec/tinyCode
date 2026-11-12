@@ -1,0 +1,10 @@
+
+ RUN  v2.1.9 <dir>
+
+ ✓ math.test.js (2 tests) 5ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  13:47:04
+   Duration  455ms (transform 30ms, setup 0ms, collect 21ms, tests 5ms, environment 0ms, prepare 125ms)
+

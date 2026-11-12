@@ -21,7 +21,7 @@ import type { Message } from "../llm.ts";
 import { applyBlocks, resolveBlockPath } from "../protocol/apply.ts";
 import { parseBlocks } from "../protocol/blocks.ts";
 import { EDIT_RULES, TESTS_RULE } from "../protocol/prompts.ts";
-import { runTests as realRunTests, shellQuote, testCommand, type TestRun } from "../testrun.ts";
+import { noCheck, runTests as realRunTests, shellQuote, testCommand, type TestRun } from "../testrun.ts";
 import { isTestPath } from "./add.ts";
 import { isCachePath } from "./cachefiles.ts";
 import { viewText } from "./edit.ts";
@@ -224,9 +224,9 @@ export interface TestGenResult {
 }
 
 /** Everything that is not a test file, as it is now: path -> text. */
-function codeSnapshot(cwd: string): Map<string, string> {
+function codeSnapshot(cwd: string, langs: readonly string[]): Map<string, string> {
   const m = new Map<string, string>();
-  for (const f of trackedFiles(cwd).concat(repoFiles(cwd))) {
+  for (const f of trackedFiles(cwd, langs).concat(repoFiles(cwd, langs))) {
     if (isTestPath(f) || isCachePath(f) || m.has(f)) continue;
     const t = readText(cwd, f);
     if (t !== null) m.set(f, t);
@@ -235,10 +235,10 @@ function codeSnapshot(cwd: string): Map<string, string> {
 }
 
 /** Put back any non-test file that changed, was removed, or appeared; returns the paths touched. */
-function guardCode(cwd: string, before: Map<string, string>): string[] {
+function guardCode(cwd: string, before: Map<string, string>, langs: readonly string[]): string[] {
   const bad: string[] = [];
   const now = new Map<string, string>();
-  for (const f of repoFiles(cwd)) {
+  for (const f of repoFiles(cwd, langs)) {
     if (isTestPath(f) || isCachePath(f)) continue;
     const t = readText(cwd, f);
     if (t !== null) now.set(f, t);
@@ -359,9 +359,20 @@ export async function runTestGen(args: TestGenArgs, deps: TestGenDeps): Promise<
   const testFile = args.test ? normpath(args.test) : args.fresh ? reproTestPath(target.file) : (existing[0] ?? newTestPath(target.file));
   const isNew = readText(cwd, testFile) === null;
   say(`target: ${target.file}${target.line ? `:${target.line}` : ""}${target.symbol ? ` (${target.symbol})` : ""}; framework: ${fw.name} (${fw.why}); tests: ${testFile}${isNew ? " (new file)" : ""}`);
+  // with "ts" on, a JS/TS target runs the project's own check (testrun.ts checkFor, design languages-and-oracles §1.5);
+  // Python and "ts" off keep the framework's own command
+  const viaCheck = cfg.languages.includes("ts") && isJs(target.file);
+  if (viaCheck) {
+    const none = noCheck(cwd, testFile, cfg.languages, cfg.test);
+    if (none) {
+      say(none);
+      return res(false, "broken", target.file, fw.name, testFile);
+    }
+  }
   const command = frameworkCommand(fw.name, cfg.test, testFile);
   const runCfg = { python: cfg.test.python, command };
-  const runIt = (): Promise<TestRun> => run({ cwd, test: testFile, config: runCfg });
+  const runIt = (): Promise<TestRun> =>
+    viaCheck ? run({ cwd, test: testFile, config: cfg.test, langs: cfg.languages }) : run({ cwd, test: testFile, config: runCfg });
 
   // ---- coverage (only when pytest-cov is already importable; nothing is installed)
   let covAvailable = false;
@@ -392,8 +403,8 @@ export async function runTestGen(args: TestGenArgs, deps: TestGenDeps): Promise<
 
   // ---- one call writes the tests
   const origs = new Map<string, string | null>();
-  const codeBefore = codeSnapshot(cwd);
-  const g = gather(cwd, target as Target, task);
+  const codeBefore = codeSnapshot(cwd, cfg.languages);
+  const g = gather(cwd, target as Target, task, undefined, cfg.languages);
   const parts = [g.text];
   const tp = readText(cwd, testFile);
   if (tp !== null) parts.push(`Existing tests ${testFile} (add to it, keep what is there):\n\`\`\`\n${viewText(tp, task, cfg.limits.viewLines)}\`\`\``);
@@ -419,9 +430,9 @@ export async function runTestGen(args: TestGenArgs, deps: TestGenDeps): Promise<
       const to = resolveBlockPath(cwd, b.path, b.search.trim() !== "");
       if (!origs.has(to)) origs.set(to, readText(cwd, to));
     }
-    const r = await applyBlocks(f.reply, { cwd, protected: [], env });
+    const r = await applyBlocks(f.reply, { cwd, protected: [], env, langs: cfg.languages });
     if (r.failed.length) say(`not applied: ${JSON.stringify(r.failed)}`);
-    const bad = guardCode(cwd, codeBefore);
+    const bad = guardCode(cwd, codeBefore, cfg.languages);
     if (bad.length) say(`refused: code files changed by the edit were put back: ${JSON.stringify(bad)}`);
     const ok: string[] = [];
     for (const p of r.applied) {

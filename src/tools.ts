@@ -11,6 +11,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { RESTORE_TOOL } from "./besttree.ts";
+import { SHELL_TOOLS } from "./limits.ts";
 import { actionable, type Route } from "./router.ts";
 
 /** Workflow (router vocabulary) -> the Pi tool that runs it. `edit` is `edit_file`: Pi's own `edit` stays the raw fallback. */
@@ -33,8 +34,11 @@ export const WORKFLOW_TOOLS = ["fix", "edit_file", "add", "explain", "test", "do
 export type WorkflowTool = (typeof WORKFLOW_TOOLS)[number];
 export const isWorkflowTool = (name: string): boolean => (WORKFLOW_TOOLS as readonly string[]).includes(name);
 
+/** Pi's shell tool: `bash`, or `powershell` on PowerShell (loop guards 2; defined in src/limits.ts, which has no Pi import). */
+export { SHELL_TOOLS } from "./limits.ts";
+
 /** Pi's own file/shell tools: a first action with one of these while the hint names a tinyCode tool gets the nudge. */
-export const RAW_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "ls"]);
+export const RAW_TOOLS = new Set(["read", ...SHELL_TOOLS, "edit", "write", "grep", "ls"]);
 
 /** What a tool run gives back: the compact text, and whether the workflow did what was asked. */
 export interface ToolOutcome {
@@ -44,6 +48,8 @@ export interface ToolOutcome {
   remaining?: string;
   /** not ok: why (STATUS: failed); defaults to the first line of the text */
   reason?: string;
+  /** ok and finished, but the model should check before reporting (design research-grounding): `STATUS: done. <check>` */
+  check?: string;
 }
 export type ToolRunner = (name: WorkflowTool, params: Record<string, unknown>, ctx: ExtensionContext) => Promise<ToolOutcome>;
 
@@ -60,7 +66,7 @@ export const forTool = (text: string): string => text.replace(/\brun \/(\w+)/g, 
 
 /** The explicit completion line every tool result ends with. done: report and stop; partial: what remains; failed: raw tools allowed. */
 export function statusLine(o: ToolOutcome): string {
-  if (o.ok && !o.remaining) return "STATUS: done. Report to user, stop.";
+  if (o.ok && !o.remaining) return o.check ? `STATUS: done. ${o.check}` : "STATUS: done. Report to user, stop.";
   if (o.ok) return `STATUS: partial \u2014 ${o.remaining}`;
   const why = (o.reason ?? o.text.trim().split("\n")[0] ?? "").slice(0, 160) || "tool could not finish";
   return `STATUS: failed \u2014 ${why}; raw tools ok`;
@@ -228,9 +234,9 @@ export function hintFor(r: Route & { source?: "code" | "model" }): { tool: strin
 // ---------------------------------------------------------------- the tool diet
 
 /** The tools of Pi's own loop. Once a request is in raw-tool work these are the only ones declared to the model (plus `restore_best` when a best tree exists). */
-export const LOOP_TOOLS = ["read", "edit", "write", "bash", "find", "run_tests", "todo"] as const;
+export const LOOP_TOOLS = ["read", "edit", "write", "bash", "powershell", "find", "run_tests", "todo"] as const;
 /** The raw tools whose first use in a request means the model is doing the work itself. */
-const RAW_WORK_TOOLS = new Set(["edit", "write", "bash"]);
+const RAW_WORK_TOOLS = new Set(["edit", "write", ...SHELL_TOOLS]);
 
 /**
  * True when this event puts the request into raw-tool work: a workflow tool returned without STATUS done (partial or
@@ -263,7 +269,8 @@ export class ToolDiet {
 /**
  * The tools to declare to the model: the baseline (what Pi had active, without `restore_best`), cut to the loop tools
  * in a diet, plus `restore_best` once a best tree exists, or from the start with `always` (E12). The order of the baseline is kept, so a repeated call with the
- * same arguments gives the same list.
+ * same arguments gives the same list. `restore_best`'s schema depends on limits.startOver (E22: an optional `to`,
+ * src/branch.ts restoreTool); it is fixed per config at registration, so no schema changes mid-run.
  */
 export function toolSet(baseline: string[], o: { diet: boolean; best: boolean; always?: boolean }): string[] {
   const loop = LOOP_TOOLS as readonly string[];

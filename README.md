@@ -4,7 +4,7 @@
 
 <p align="center">A <a href="https://github.com/earendil-works/pi">Pi</a> extension that keeps the context small, so local models finish coding tasks in a 16k window where plain Pi runs out of room.</p>
 
-> **Preview — v1.0.4.** Works, but rough edges remain; see [Known issues](#known-issues-v104). Feedback welcome via GitHub issues.
+> **Preview — v1.1.0.** Works, but rough edges remain; see [Known issues](#known-issues-v110). Feedback welcome via GitHub issues.
 
 ## Why
 
@@ -195,8 +195,24 @@ the calls per step; `/dev on` turns on diagnostics (events, per-call tokens) and
 
 ## Roadmap
 
-v1.1 aims at an 8k window (8 GB cards and laptops), v1.2 at bugs described in words, v1.3 at handing jobs to your local
-machine from another agent: [ROADMAP.md](ROADMAP.md).
+v1.1 covers every developer task at 16k and up (the 8k target was dropped), v1.2 aims at bugs described in words, and
+v1.3 at handing jobs to your local machine from another agent: [ROADMAP.md](ROADMAP.md).
+
+## What's new in v1.1.0
+
+Every change in this release was measured against the same local model, and switched on only where the numbers said
+so. The full notes are on the [v1.1.0 release](https://github.com/moralec/tinyCode/releases/tag/v1.1.0), with the
+capabilities PDF (every mechanism and its status).
+
+- **"Fixed" means a failing check turned green.** If the tests already pass before any change, `/fix` says so instead
+  of reporting a fix.
+- **`/plan` reviews its plan by default.** Plans read the files they will change before they are final: 12 of 15
+  good plans against 9 of 15. Set `stages.planReview` to `false` to turn it off.
+- **Edits with a repeated marker line** (`=======`, `<<<<<<< SEARCH`, `>>>>>>> REPLACE`) are read once.
+- **`/build`** offers each task the files it must create, and says how many tasks are left.
+- **Removed:** the acceptance check written from the request. A config with an `acceptance` block is refused: delete
+  the block.
+- The benchmark grew from 27 to 54 tasks, including three real bugs from a 100,000-line open-source project.
 
 ## Security fixes (v1.0.4)
 
@@ -217,13 +233,16 @@ them are fixed in this release, each with a regression test:
 Still good practice: treat an unfamiliar repository with the same care as running its tests, because `/fix` and `/test`
 do run them.
 
-## Known issues (v1.0.4)
+## Known issues (v1.1.0)
 
-1. When both sides finish, tinyCode is often slower: its extra steps cost time on tasks that fit anyway.
-2. Runs vary: the same task can pass in 30 s or hit the 10-minute cap. Steadier runs are on the roadmap.
-3. Small models on 8 GB cards don't benefit yet; see the results.
-4. `install.ps1` is untested on real Windows.
-5. Results so far are from five tasks on one machine.
+1. Runs vary: the same task can pass in 30 s or hit the 10-minute cap. Steadier runs are on the roadmap.
+2. `/build` finishes only the first task of a plan on its own; the model completes the rest by hand.
+3. The router sends some requests to the wrong workflow: a symptom-only bug report, a rename, and questions about
+   the project's own code (which never go to `/research`).
+4. Small models on 8 GB cards don't benefit yet; see the results.
+5. `install.ps1` is untested on real Windows.
+6. The results above are from earlier releases. A full baseline of plain Pi against tinyCode on the new 49-task
+   benchmark comes next.
 
 ## Licence
 

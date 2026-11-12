@@ -1,7 +1,9 @@
-// Shared types and helpers for routines (no imports from the routines themselves, so no import cycle).
+// Shared types and helpers for routines (no imports from the routines themselves, so no import cycle; the test
+// runner, ../testrun.ts, imports none of them either).
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { runTests } from "../testrun.ts";
 
 export interface CheckOptions {
   cwd: string;
@@ -9,6 +11,15 @@ export interface CheckOptions {
   python: string;
   /** a test to run after the compile check: `--test PATH` or config test.command; absent = compile only */
   test?: { path?: string; command: string | null };
+  /** config `languages` (which check runs: testrun.ts checkFor); absent = Python only */
+  langs?: readonly string[];
+}
+
+/** The test /edit asked for, run with the project's check (testrun.ts checkFor); null when none was asked for. */
+export async function runAskedTests(o: CheckOptions): Promise<{ ok: boolean; out: string } | null> {
+  if (!o.test || !(o.test.path || o.test.command)) return null;
+  const t = await runTests({ cwd: o.cwd, test: o.test.path, config: { python: o.python, command: o.test.command }, langs: o.langs });
+  return { ok: t.ok, out: t.text };
 }
 export interface Loaded {
   /** the text the model edits (LF) */

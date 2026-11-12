@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { tmpDir } from "./tmpdir.ts";
-import { plainRoutine, pyRoutine, routineFor, run, scptRoutine, RoutineError } from "../../src/routines/index.ts";
+import { codeRoutine, KNOWN_EXTS, plainRoutine, pyRoutine, routineFor, run, runAskedTests, scptRoutine, RoutineError } from "../../src/routines/index.ts";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const PY = (process.env.TINYCODE_TEST_PYTHON ?? "python3");
@@ -100,4 +100,27 @@ test("py check: a repository py_compile.py next to the file is never imported (-
   assert.equal(r.ok, true);
   assert.equal(existsSync(mark), false);
   assert.equal(existsSync(join(d, "__pycache__")), false, "the .pyc still goes outside the project");
+});
+
+test("code routine: JS/TS files only with \"ts\" in languages; .tsx stays plain; KNOWN_EXTS unchanged", async () => {
+  assert.equal(routineFor("a.ts"), plainRoutine);
+  assert.equal(routineFor("a.ts", ["py", "ts"]), codeRoutine);
+  assert.equal(routineFor("a.mjs", ["py", "ts"]), codeRoutine);
+  assert.equal(routineFor("a.tsx", ["py", "ts"]), plainRoutine);
+  assert.equal(routineFor("a.py", ["py", "ts"]), pyRoutine);
+  assert.ok(!KNOWN_EXTS.includes(".ts"));
+  const d = tmpDir("code-routine-");
+  writeFileSync(join(d, "ok.js"), "export const a = 1;\n");
+  writeFileSync(join(d, "bad.js"), "export const = ;\n");
+  writeFileSync(join(d, "a.ts"), "export const a: number = 1;\n");
+  assert.deepEqual(await codeRoutine.check(join(d, "ok.js"), { cwd: d, python: "python3" }), { ok: true, out: "syntax ok" });
+  assert.equal((await codeRoutine.check(join(d, "bad.js"), { cwd: d, python: "python3" })).ok, false);
+  assert.match((await codeRoutine.check(join(d, "a.ts"), { cwd: d, python: "python3" })).out, /no check for \.ts/);
+});
+
+test("runAskedTests: null when no test was asked for; a configured command runs", async () => {
+  const d = tmpDir("asked-");
+  assert.equal(await runAskedTests({ cwd: d, python: "python3" }), null);
+  const r = await runAskedTests({ cwd: d, python: "python3", test: { command: "echo '1 passed in 0.01s'" } });
+  assert.equal(r?.ok, true);
 });

@@ -497,6 +497,61 @@ function jsSymbols(src: string): Sym[] {
   return out;
 }
 
+/** A JS/TS symbol for the outline: top-level, with its header (design languages-and-oracles §4). */
+export interface OutlineSym extends Sym {
+  /** source from the symbol's line to its body's `{` (or the arrow), joined, whitespace collapsed */
+  header: string;
+}
+
+/**
+ * The top-level JS/TS symbols: none inside another function's or method's body. Spans are found with matchBrace on the
+ * masked source, without BODY_CAP, so a function 80+ lines into its parent is still seen as nested. Methods are kept
+ * when their class is top-level. jsSymbols itself is unchanged.
+ */
+export function jsTopLevel(src: string): OutlineSym[] {
+  const syms = jsSymbols(src);
+  const m = mask(src, jsScan(src));
+  const starts: number[] = [];
+  let o = 0;
+  for (const l of src.split("\n")) {
+    starts.push(o);
+    o += l.length + 1;
+  }
+  const lineOf = (pos: number): number => {
+    let i = 0;
+    while (i + 1 < starts.length && starts[i + 1]! <= pos) i++;
+    return i + 1;
+  };
+  const lineText = (line: number): string => m.slice(starts[line - 1]!, (starts[line] ?? m.length + 1) - 1);
+  /** where the body opens (`{`), or the arrow (`=>`) of an arrow with no braced body; -1 for none */
+  const bodyAt = (s: Sym): number => {
+    if (s.kind === "type") return -1;
+    const at = starts[s.line - 1]!;
+    const arrow = m.indexOf("=>", at);
+    const brace = m.indexOf("{", at);
+    if (arrow >= 0 && (brace < 0 || arrow < brace) && !/=>\s*\{/.test(lineText(s.line))) return arrow;
+    return brace;
+  };
+  const span = (s: Sym): [number, number] => {
+    const b = bodyAt(s);
+    if (b < 0 || m[b] !== "{") return [s.line, s.line];
+    const e = matchBrace(m, b);
+    return [s.line, e < 0 ? s.line : lineOf(e)];
+  };
+  const bodies = syms.filter((s) => s.kind === "function" || s.kind === "method").map((s) => ({ s, span: span(s) }));
+  const inside = (s: Sym): boolean => bodies.some((b) => b.s !== s && b.span[0] < s.line && s.line <= b.span[1]);
+  const top = syms.filter((s) => s.kind !== "method" && s.kind !== "module" && !inside(s));
+  const classes = new Set(top.filter((s) => s.kind === "class").map((s) => s.name));
+  const kept = syms.filter((s) => top.includes(s) || (s.kind === "method" && classes.has(s.name.split(".")[0]!) && !inside(s)));
+  return kept.map((s) => {
+    const b = bodyAt(s);
+    const raw = src.slice(starts[s.line - 1]!, b < 0 ? (starts[s.line] ?? src.length + 1) - 1 : b);
+    // a wrapped header joins to one line: no space inside the parentheses, no trailing comma before ")"
+    const header = raw.replace(/\s+/g, " ").replace(/\(\s+/g, "(").replace(/\s*,?\s*\)/g, ")").trim();
+    return { ...s, header };
+  });
+}
+
 export function listSymbols(lang: Lang, src: string): Sym[] {
   return lang === "py" ? pySymbols(src) : jsSymbols(src);
 }

@@ -1,0 +1,29 @@
+TAP version 13
+# Subtest: math
+    # Subtest: adds two numbers
+    ok 1 - adds two numbers
+      ---
+      duration_ms: 1.106837
+      type: 'test'
+      ...
+    # Subtest: multiplies two numbers
+    ok 2 - multiplies two numbers
+      ---
+      duration_ms: 0.23758
+      type: 'test'
+      ...
+    1..2
+ok 1 - math
+  ---
+  duration_ms: 3.114046
+  type: 'suite'
+  ...
+1..1
+# tests 2
+# suites 1
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 105.466744

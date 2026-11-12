@@ -53,3 +53,34 @@ test("cleanPath drops a leading File: / Path: the model echoed from the prompt (
   assert.equal(parseBlocks("File: todo/model.py\n<<<<<<< SEARCH\nclass Task:\n=======\nclass Task:\n    \"\"\"A task.\"\"\"\n>>>>>>> REPLACE")[0]!.path, "todo/model.py");
   assert.equal(cleanPath("profile.py"), "profile.py");
 });
+
+test("a doubled divider before REPLACE is dropped, not written into the file (build-1 task 1, runs-pbf 2026-11-11)", () => {
+  const reply =
+    "habits/__init__.py\n<<<<<<< SEARCH\n=======\n=======\n>>>>>>> REPLACE\n\n" +
+    "habits/__main__.py\n<<<<<<< SEARCH\n=======\nimport sys\n\nif __name__ == \"__main__\":\n    sys.exit(0)\n=======\n>>>>>>> REPLACE";
+  assert.deepEqual(parseBlocks(reply), [
+    { path: "habits/__init__.py", search: "", replace: "" },
+    { path: "habits/__main__.py", search: "", replace: 'import sys\n\nif __name__ == "__main__":\n    sys.exit(0)' },
+  ]);
+});
+
+test("a ======= line inside REPLACE, not at its end, is kept", () => {
+  assert.deepEqual(parseBlocks(blk("README.rst", "Title", "Title\n=======\n\nText")), [
+    { path: "README.rst", search: "Title", replace: "Title\n=======\n\nText" },
+  ]);
+});
+
+test("doubled SEARCH and REPLACE markers parse as one block (fix-6 reproduction, runs-fix 2026-11-11)", () => {
+  const reply =
+    "tests/test_convert_repro.py\n<<<<<<< SEARCH\n<<<<<<< SEARCH\n=======\nimport unitkit\n\n\ndef test_f_to_c():\n    assert unitkit.convert(212, \"F\", \"C\") == 100.0\n>>>>>>> REPLACE\n>>>>>>> REPLACE";
+  assert.deepEqual(parseBlocks(reply), [
+    { path: "tests/test_convert_repro.py", search: "", replace: 'import unitkit\n\n\ndef test_f_to_c():\n    assert unitkit.convert(212, "F", "C") == 100.0' },
+  ]);
+});
+
+test("a doubled marker line inside a normal edit is dropped too; two separate blocks stay two", () => {
+  assert.deepEqual(parseBlocks("a.py\n<<<<<<< SEARCH\n<<<<<<< SEARCH\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n>>>>>>> REPLACE\n\nb.py\n<<<<<<< SEARCH\ny = 1\n=======\ny = 2\n>>>>>>> REPLACE"), [
+    { path: "a.py", search: "x = 1", replace: "x = 2" },
+    { path: "b.py", search: "y = 1", replace: "y = 2" },
+  ]);
+});

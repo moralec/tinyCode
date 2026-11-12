@@ -13,7 +13,7 @@ import { lintPass, type LintOptions } from "../lint.ts";
 import type { Message } from "../llm.ts";
 import { applyReply, type ApplyResult } from "../protocol/apply.ts";
 import { EDIT_RULES } from "../protocol/prompts.ts";
-import { runTests as realRunTests } from "../testrun.ts";
+import { noCheck, runTests as realRunTests } from "../testrun.ts";
 import { viewText } from "./edit.ts";
 import { PICK_SCHEMA, changedSinceSnapshot, restoreSnapshot, runFix, takeSnapshot, type ChatFn, type FixResult, type PiHandoff } from "./fix.ts";
 
@@ -74,6 +74,8 @@ export interface AddResult {
   fix?: FixResult;
   /** set when /add failed and put every file back as it found it: why it failed, and what was restored or removed */
   undone?: { why: string; restored: string[]; removed: string[] };
+  /** set when no test command could be found (testrun.ts checkFor): the reason; nothing ran */
+  none?: string;
   lines: string[];
 }
 
@@ -164,13 +166,18 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
     say("usage: /add [--test PATH] [--file PATH] <what to add>");
     return res(false, null, null, []);
   }
+  const none = noCheck(cwd, args.test ? normpath(args.test) : undefined, cfg.languages, cfg.test);
+  if (none) {
+    say(none);
+    return { ...res(false, null, null, []), none };
+  }
   const call = async (step: string, msgs: Message[], opts: { schema?: object; schemaName?: string } = {}): Promise<string> => {
     calls++;
     return (await deps.chat(step, msgs, { ...opts, workflow: "add", config: cfg, env })).text;
   };
 
   // ---- target file: the hint, else one pick call
-  const head = `Repository outline:\n${outline(cwd, 3000)}`;
+  const head = `Repository outline:\n${outline(cwd, 3000, cfg.languages)}`;
   let target: string | null = null;
   let extra: string[] = [];
   const hint = args.file ? normpath(args.file) : "";
@@ -222,13 +229,13 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
     ? `Write the new code in ${target} and a test for it in ${testPath}${insideFile(cwd, testPath) ? " (it exists; add to it)" : " (a new file)"}.`
     : `Write the new code in ${target} and a test for it in a test file.`;
 
-  takeSnapshot(cwd, env); // before the first write; /fix --undo restores this (the ladder keeps it: keepUndo)
+  takeSnapshot(cwd, cfg.languages, env); // before the first write; /fix --undo restores this (the ladder keeps it: keepUndo)
   pg.step("write");
   const reply = await call("edit", [
     { role: "system", content: ADD_RULES },
     { role: "user", content: `${parts.join("\n\n")}\n\nTask:\n${args.task}\n${testLine}\n\nEdit blocks only.` },
   ]);
-  const applied = await applyReply(reply, { cwd, protected: [], maxWholeFileLines: 400, env });
+  const applied = await applyReply(reply, { cwd, protected: [], maxWholeFileLines: 400, env, langs: cfg.languages });
   for (const f of applied.applied) pg.touch(f);
   const wroteTarget = applied.applied.includes(target);
   const wroteTest = applied.applied.find((p) => isTestPath(p) && p !== target) ?? null;
@@ -269,7 +276,7 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
   if (notApplied) return handOver(notApplied);
 
   pg.step("test");
-  let t = await tests({ cwd, test: testToRun, config: cfg.test });
+  let t = await tests({ cwd, test: testToRun, config: cfg.test, langs: cfg.languages });
   say(`test ${testToRun ?? "(suite)"}: ${t.ok ? "pass" : "fail"}`);
   if (!t.ok && wroteTest && isCollectionError(t.text)) {
     // a new test that does not even import or parse is /add's own failure: one retry with the error, else undo
@@ -286,10 +293,10 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
           "Corrected edit blocks against current files (fix the test file or the code it imports).",
       },
     ]);
-    const again = await applyReply(retry, { cwd, protected: [], maxWholeFileLines: 400, env });
+    const again = await applyReply(retry, { cwd, protected: [], maxWholeFileLines: 400, env, langs: cfg.languages });
     for (const f of again.applied) pg.touch(f);
     say(`applied: ${JSON.stringify(again.applied)}${again.failed.length ? `; not applied: ${JSON.stringify(again.failed)}` : ""}`);
-    t = await tests({ cwd, test: testToRun, config: cfg.test });
+    t = await tests({ cwd, test: testToRun, config: cfg.test, langs: cfg.languages });
     say(`test ${testToRun ?? "(suite)"}: ${t.ok ? "pass" : "fail"}`);
     if (!t.ok && isCollectionError(t.text)) return undo(`the new test still fails at collection (${t.text.split("\n").find((l) => /^E\s/.test(l))?.slice(0, 150).trim() ?? "import or syntax error"})`);
   }
@@ -298,7 +305,7 @@ export async function runAdd(args: AddArgs, deps: AddDeps): Promise<AddResult> {
   pg.step("lint");
   await lintPass(
     { cwd, files: changed(), env, trustRepo: true }, // /add runs the project's tests
-    { report: say, lint: deps.lint, verify: async () => (await tests({ cwd, test: testToRun, config: cfg.test })).ok },
+    { report: say, lint: deps.lint, verify: async () => (await tests({ cwd, test: testToRun, config: cfg.test, langs: cfg.languages })).ok },
   );
   const files = changed();
   say(`added: ${files.join(", ")}`);

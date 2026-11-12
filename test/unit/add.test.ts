@@ -140,7 +140,9 @@ test("nothing applied: straight to the ladder; no target found: says so, no call
   const { cwd, env } = mk({ "textutil.py": "def title_case(text):\n    return text.title()\n", "tests/test_ok.py": "def test_ok():\n    assert True\n" });
   const s = scripted(["I would add a function.", JSON.stringify({ files: ["textutil.py"], reason: "x" }), block("textutil.py", "def title_case(text):", "def zed(text):\n    return text\n\n\ndef title_case(text):")]);
   const r = await runAdd({ file: "textutil.py", task: "add zed" }, { cwd, config: cfg(), chat: s.chat, report: () => {}, env });
-  assert.equal(r.fix?.solvedBy, "rung1");
+  // the only test (test_ok) passes before any change, so nothing can show the addition works: not "solved" (fix-6 rule)
+  assert.equal(r.fix?.solvedBy, "none");
+  assert.match(r.fix?.none ?? "", /already pass(es)? before any change/);
   const s2 = scripted([JSON.stringify({ files: ["nope.py"], reason: "x" })]);
   const lines: string[] = [];
   const r2 = await runAdd({ task: "add a thing" }, { cwd: slug().cwd, config: cfg(), chat: s2.chat, report: (l) => lines.push(l), env });

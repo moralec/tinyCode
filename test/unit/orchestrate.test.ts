@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig, type Config } from "../../src/config.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
-import { agreement, asToolTurn, choose, CUSTOM_RESULT, directCall, DoneGuard, formatOrchestration, namedFiles, rateFor, resultMessage, runDirect, scopeAfter, scopeBefore, sentenceFor, targetOf, type DecisionRecord, type DirectCall } from "../../src/orchestrate.ts";
+import { agreement, asToolTurn, choose, CUSTOM_RESULT, TASK_REF, directCall, DoneGuard, formatOrchestration, namedFiles, rateFor, resultMessage, runDirect, scopeAfter, scopeBefore, sentenceFor, targetOf, type DecisionRecord, type DirectCall } from "../../src/orchestrate.ts";
 import { buildIndex, heuristic, route } from "../../src/router.ts";
 import { statusLine } from "../../src/tools.ts";
 import type { ChatFn } from "../../src/workflows/fix.ts";
@@ -149,6 +149,12 @@ test("confident -> direct run: the sentence is shown BEFORE the run, the result 
   assert.equal(asst.content[0]!.name, "fix");
   assert.equal(asst.content[0]!.arguments!.intent, r.said);
   assert.equal(asst.content[0]!.arguments!.task, "fix it");
+  // E13 (taskRef): the same task, word for word after the request, becomes a reference; a different task stays
+  const ref = asToolTurn(msgs, { id: "m", provider: "p", api: "a" }, { taskRef: true })! as unknown as { content: { arguments?: Record<string, string> }[] }[];
+  assert.equal(ref[1]!.content[0]!.arguments!.task, TASK_REF);
+  const other = [msgs[0]!, { role: "user", content: "something else" }, msgs[2]!];
+  const kept = asToolTurn(other, { id: "m", provider: "p", api: "a" }, { taskRef: true })! as unknown as { content: { arguments?: Record<string, string> }[] }[];
+  assert.equal(kept[1]!.content[0]!.arguments!.task, "fix it");
   const tr = turned[2]! as unknown as { toolCallId: string; content: { text: string }[]; isError: boolean };
   assert.equal(tr.toolCallId, asst.content[0]!.id);
   assert.match(tr.content[0]!.text, /STATUS: done/);

@@ -142,7 +142,7 @@ export async function runEdit(args: EditArgs, deps: EditDeps): Promise<EditResul
     return result(false);
   }
   const abs = resolve(cwd, args.path);
-  const routine = deps.routine ?? routineFor(abs);
+  const routine = deps.routine ?? routineFor(abs, cfg.languages);
   const av = routine.available();
   if (!av.ok) {
     say(av.why ?? `the ${routine.name} routine is not available here`);
@@ -165,6 +165,7 @@ export async function runEdit(args: EditArgs, deps: EditDeps): Promise<EditResul
     cwd,
     python: cfg.test.python,
     test: args.test || cfg.test.command ? { path: args.test, command: cfg.test.command } : undefined,
+    langs: cfg.languages,
   };
 
   const loaded = await routine.load(abs);
@@ -174,7 +175,7 @@ export async function runEdit(args: EditArgs, deps: EditDeps): Promise<EditResul
   };
   try {
     const sys = EDIT_RULES;
-    const head = `Repository outline:\n${outline(cwd, 3000)}\n\n`;
+    const head = `Repository outline:\n${outline(cwd, 3000, cfg.languages)}\n\n`;
     const msgs: Message[] = [
       { role: "system", content: sys },
       {
@@ -197,7 +198,7 @@ export async function runEdit(args: EditArgs, deps: EditDeps): Promise<EditResul
       const target = join(scratch, shown);
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, text);
-      const res = await applyReply(r.text, { cwd: scratch, protected: [], maxWholeFileLines: 400, env: deps.env });
+      const res = await applyReply(r.text, { cwd: scratch, protected: [], maxWholeFileLines: 400, env: deps.env, langs: cfg.languages });
       const hit = res.applied.includes(shown);
       const extra = res.applied.filter((p) => p !== shown);
       let problem: string | null = null;

@@ -1,0 +1,150 @@
+{
+ "existing": {
+  "calls": [
+   {
+    "step": "plan",
+    "messages": [
+     {
+      "role": "system",
+      "content": "Plan a small software change: short spec plus ordered task list.\nReply JSON: {\"spec\":\"<3-6 sentences: what it does, how it behaves>\",\"stack\":\"<language, libraries, test tool>\",\"tasks\":[{\"id\":1,\"title\":\"<one short sentence>\",\"files\":[\"<relative path>\"],\"test\":\"<test that defines done: file and what it checks>\"}]}\n3 to 12 tasks, ids 1,2,3,... in build order. Task = one behaviour, one or two files.\nfiles: paths relative to project root, never absolute. Each task names the test that proves it done, written before the code.\nEarly tasks set up what later ones need. Existing code: follow its files and conventions."
+     },
+     {
+      "role": "user",
+      "content": "Repository outline:\nexporter/__init__.py: -\nexporter/cli.py: def main(argv)\nexporter/settings.py: EXTENSIONS; DEFAULT_FORMAT\nexporter/formats/__init__.py: REGISTRY; def get(name); def names()\nexporter/formats/json_fmt.py: def write_json(records, fh)\nexporter/formats/text_fmt.py: def write_text(records, fh)\ntests/test_formats.py: def test_json_round_trip(tmp_path); def test_text_output(tmp_path); def test_registered(); def test_list(capsys)\n\nRequest: Make a plan for new output formats in this exporter tool. Don't change any code yet. Write the plan to PLAN.md: a numbered list of 3 to 12 tasks in build order, each task one behaviour; under each task a `files:` line (the files it creates or changes, relative paths) and a `test:` line (the test file and what the test checks).\n\nRequirements:\n1. A `csv` format: a header row from the first record's keys, then one row per record, quoted the way Python's csv module quotes.\n2. A `markdown` format: a Markdown table; a `|` inside a value is escaped as `\\|`.\n3. A `--fields a,b,c` option that picks and orders the columns, for every format.\n4. `--list-formats` shows the new formats too.\n5. Records that do not all have the same keys: a missing value is written as an empty cell (csv and markdown).\n6. When no output path is given, the result goes to standard output.\n\nConstraints: the json output must stay byte-for-byte what it is today, so the module that writes json must not change at all; register the new formats the same way json and text are registered.\n\nPlan it."
+     }
+    ],
+    "opts": {
+     "workflow": "plan",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "spec": {
+        "type": "string"
+       },
+       "stack": {
+        "type": "string"
+       },
+       "tasks": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 12,
+        "items": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "integer"
+          },
+          "title": {
+           "type": "string"
+          },
+          "files": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          "test": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id",
+          "title",
+          "files",
+          "test"
+         ]
+        }
+       }
+      },
+      "required": [
+       "spec",
+       "stack",
+       "tasks"
+      ]
+     },
+     "schemaName": "plan"
+    }
+   }
+  ],
+  "planJson": "{\n  \"spec\": \"This plan adds CSV and Markdown output formats to the exporter tool, ensuring they handle missing keys gracefully by outputting empty cells. It introduces a `--fields` CLI option to allow users to select and order specific columns for any format. The `--list-formats` option is updated to include the new formats. Existing JSON output remains untouched to preserve byte-for-byte stability, while the registry and CLI are updated to support the new functionality and default to stdout when no output path is specified.\",\n  \"stack\": \"Python, csv, markdown, pytest\",\n  \"tasks\": [\n    {\n      \"id\": 1,\n      \"title\": \"Implement CSV writer module with header and quoting logic\",\n      \"files\": [\n        \"exporter/formats/csv_fmt.py\"\n      ],\n      \"test\": \"tests/test_formats.py checks that csv output has a header row derived from the first record's keys, subsequent rows are quoted according to Python's csv module standards, and missing keys in records result in empty cells.\",\n      \"done\": false\n    },\n    {\n      \"id\": 2,\n      \"title\": \"Implement Markdown writer module with table formatting and pipe escaping\",\n      \"files\": [\n        \"exporter/formats/md_fmt.py\"\n      ],\n      \"test\": \"tests/test_formats.py checks that markdown output is a valid table, pipe characters `|` within values are escaped as `\\\\|`, and missing keys result in empty cells.\",\n      \"done\": false\n    },\n    {\n      \"id\": 3,\n      \"title\": \"Register CSV and Markdown formats in the format registry\",\n      \"files\": [\n        \"exporter/formats/__init__.py\"\n      ],\n      \"test\": \"tests/test_formats.py checks that `formats.names()` includes 'csv' and 'md' and `formats.get()` returns the correct writer functions for them.\",\n      \"done\": false\n    },\n    {\n      \"id\": 4,\n      \"title\": \"Add --fields CLI option to filter and order columns\",\n      \"files\": [\n        \"exporter/cli.py\"\n      ],\n      \"test\": \"tests/test_cli.py checks that `--fields a,b,c` restricts output to only those columns in the specified order for csv, md, json, and text formats.\",\n      \"done\": false\n    },\n    {\n      \"id\": 5,\n      \"title\": \"Add --list-formats CLI option to display available formats\",\n      \"files\": [\n        \"exporter/cli.py\"\n      ],\n      \"test\": \"tests/test_cli.py checks that `--list-formats` outputs a list including 'csv' and 'md' alongside existing formats.\",\n      \"done\": false\n    },\n    {\n      \"id\": 6,\n      \"title\": \"Ensure default output is stdout when no path is provided\",\n      \"files\": [\n        \"exporter/cli.py\"\n      ],\n      \"test\": \"tests/test_cli.py checks that when no output path is provided, the formatted data is written to stdout rather than a file.\",\n      \"done\": false\n    }\n  ]\n}\n",
+  "planMd": "# Plan\n\nThis plan adds CSV and Markdown output formats to the exporter tool, ensuring they handle missing keys gracefully by outputting empty cells. It introduces a `--fields` CLI option to allow users to select and order specific columns for any format. The `--list-formats` option is updated to include the new formats. Existing JSON output remains untouched to preserve byte-for-byte stability, while the registry and CLI are updated to support the new functionality and default to stdout when no output path is specified.\n\n**Stack:** Python, csv, markdown, pytest\n\n## Tasks\n\n1. [ ] Implement CSV writer module with header and quoting logic\n   - files: exporter/formats/csv_fmt.py\n   - test: tests/test_formats.py checks that csv output has a header row derived from the first record's keys, subsequent rows are quoted according to Python's csv module standards, and missing keys in records result in empty cells.\n2. [ ] Implement Markdown writer module with table formatting and pipe escaping\n   - files: exporter/formats/md_fmt.py\n   - test: tests/test_formats.py checks that markdown output is a valid table, pipe characters `|` within values are escaped as `\\|`, and missing keys result in empty cells.\n3. [ ] Register CSV and Markdown formats in the format registry\n   - files: exporter/formats/__init__.py\n   - test: tests/test_formats.py checks that `formats.names()` includes 'csv' and 'md' and `formats.get()` returns the correct writer functions for them.\n4. [ ] Add --fields CLI option to filter and order columns\n   - files: exporter/cli.py\n   - test: tests/test_cli.py checks that `--fields a,b,c` restricts output to only those columns in the specified order for csv, md, json, and text formats.\n5. [ ] Add --list-formats CLI option to display available formats\n   - files: exporter/cli.py\n   - test: tests/test_cli.py checks that `--list-formats` outputs a list including 'csv' and 'md' alongside existing formats.\n6. [ ] Ensure default output is stdout when no path is provided\n   - files: exporter/cli.py\n   - test: tests/test_cli.py checks that when no output path is provided, the formatted data is written to stdout rather than a file.\n",
+  "result": {
+   "calls": 1,
+   "errors": []
+  }
+ },
+ "empty": {
+  "calls": [
+   {
+    "step": "plan",
+    "messages": [
+     {
+      "role": "system",
+      "content": "Plan a small software change: short spec plus ordered task list.\nReply JSON: {\"spec\":\"<3-6 sentences: what it does, how it behaves>\",\"stack\":\"<language, libraries, test tool>\",\"tasks\":[{\"id\":1,\"title\":\"<one short sentence>\",\"files\":[\"<relative path>\"],\"test\":\"<test that defines done: file and what it checks>\"}]}\n3 to 12 tasks, ids 1,2,3,... in build order. Task = one behaviour, one or two files.\nfiles: paths relative to project root, never absolute. Each task names the test that proves it done, written before the code.\nEarly tasks set up what later ones need. Existing code: follow its files and conventions."
+     },
+     {
+      "role": "user",
+      "content": "The folder is empty: a new project.\n\nRequest: Make a plan for new output formats in this exporter tool. Don't change any code yet. Write the plan to PLAN.md: a numbered list of 3 to 12 tasks in build order, each task one behaviour; under each task a `files:` line (the files it creates or changes, relative paths) and a `test:` line (the test file and what the test checks).\n\nRequirements:\n1. A `csv` format: a header row from the first record's keys, then one row per record, quoted the way Python's csv module quotes.\n2. A `markdown` format: a Markdown table; a `|` inside a value is escaped as `\\|`.\n3. A `--fields a,b,c` option that picks and orders the columns, for every format.\n4. `--list-formats` shows the new formats too.\n5. Records that do not all have the same keys: a missing value is written as an empty cell (csv and markdown).\n6. When no output path is given, the result goes to standard output.\n\nConstraints: the json output must stay byte-for-byte what it is today, so the module that writes json must not change at all; register the new formats the same way json and text are registered.\n\nPlan it."
+     }
+    ],
+    "opts": {
+     "workflow": "plan",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "spec": {
+        "type": "string"
+       },
+       "stack": {
+        "type": "string"
+       },
+       "tasks": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 12,
+        "items": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "integer"
+          },
+          "title": {
+           "type": "string"
+          },
+          "files": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          "test": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id",
+          "title",
+          "files",
+          "test"
+         ]
+        }
+       }
+      },
+      "required": [
+       "spec",
+       "stack",
+       "tasks"
+      ]
+     },
+     "schemaName": "plan"
+    }
+   }
+  ],
+  "planJson": "{\n  \"spec\": \"This plan adds CSV and Markdown output formats to the exporter tool, ensuring they handle missing keys gracefully by outputting empty cells. It introduces a `--fields` CLI option to allow users to select and order specific columns for any format. The `--list-formats` option is updated to include the new formats. Existing JSON output remains untouched to preserve byte-for-byte stability, while the registry and CLI are updated to support the new functionality and default to stdout when no output path is specified.\",\n  \"stack\": \"Python, csv, markdown, pytest\",\n  \"tasks\": [\n    {\n      \"id\": 1,\n      \"title\": \"Implement CSV writer module with header and quoting logic\",\n      \"files\": [\n        \"exporter/formats/csv_fmt.py\"\n      ],\n      \"test\": \"tests/test_formats.py checks that csv output has a header row derived from the first record's keys, subsequent rows are quoted according to Python's csv module standards, and missing keys in records result in empty cells.\",\n      \"done\": false\n    },\n    {\n      \"id\": 2,\n      \"title\": \"Implement Markdown writer module with table formatting and pipe escaping\",\n      \"files\": [\n        \"exporter/formats/md_fmt.py\"\n      ],\n      \"test\": \"tests/test_formats.py checks that markdown output is a valid table, pipe characters `|` within values are escaped as `\\\\|`, and missing keys result in empty cells.\",\n      \"done\": false\n    },\n    {\n      \"id\": 3,\n      \"title\": \"Register CSV and Markdown formats in the format registry\",\n      \"files\": [\n        \"exporter/formats/__init__.py\"\n      ],\n      \"test\": \"tests/test_formats.py checks that `formats.names()` includes 'csv' and 'md' and `formats.get()` returns the correct writer functions for them.\",\n      \"done\": false\n    },\n    {\n      \"id\": 4,\n      \"title\": \"Add --fields CLI option to filter and order columns\",\n      \"files\": [\n        \"exporter/cli.py\"\n      ],\n      \"test\": \"tests/test_cli.py checks that `--fields a,b,c` restricts output to only those columns in the specified order for csv, md, json, and text formats.\",\n      \"done\": false\n    },\n    {\n      \"id\": 5,\n      \"title\": \"Add --list-formats CLI option to display available formats\",\n      \"files\": [\n        \"exporter/cli.py\"\n      ],\n      \"test\": \"tests/test_cli.py checks that `--list-formats` outputs a list including 'csv' and 'md' alongside existing formats.\",\n      \"done\": false\n    },\n    {\n      \"id\": 6,\n      \"title\": \"Ensure default output is stdout when no path is provided\",\n      \"files\": [\n        \"exporter/cli.py\"\n      ],\n      \"test\": \"tests/test_cli.py checks that when no output path is provided, the formatted data is written to stdout rather than a file.\",\n      \"done\": false\n    }\n  ]\n}\n",
+  "planMd": "# Plan\n\nThis plan adds CSV and Markdown output formats to the exporter tool, ensuring they handle missing keys gracefully by outputting empty cells. It introduces a `--fields` CLI option to allow users to select and order specific columns for any format. The `--list-formats` option is updated to include the new formats. Existing JSON output remains untouched to preserve byte-for-byte stability, while the registry and CLI are updated to support the new functionality and default to stdout when no output path is specified.\n\n**Stack:** Python, csv, markdown, pytest\n\n## Tasks\n\n1. [ ] Implement CSV writer module with header and quoting logic\n   - files: exporter/formats/csv_fmt.py\n   - test: tests/test_formats.py checks that csv output has a header row derived from the first record's keys, subsequent rows are quoted according to Python's csv module standards, and missing keys in records result in empty cells.\n2. [ ] Implement Markdown writer module with table formatting and pipe escaping\n   - files: exporter/formats/md_fmt.py\n   - test: tests/test_formats.py checks that markdown output is a valid table, pipe characters `|` within values are escaped as `\\|`, and missing keys result in empty cells.\n3. [ ] Register CSV and Markdown formats in the format registry\n   - files: exporter/formats/__init__.py\n   - test: tests/test_formats.py checks that `formats.names()` includes 'csv' and 'md' and `formats.get()` returns the correct writer functions for them.\n4. [ ] Add --fields CLI option to filter and order columns\n   - files: exporter/cli.py\n   - test: tests/test_cli.py checks that `--fields a,b,c` restricts output to only those columns in the specified order for csv, md, json, and text formats.\n5. [ ] Add --list-formats CLI option to display available formats\n   - files: exporter/cli.py\n   - test: tests/test_cli.py checks that `--list-formats` outputs a list including 'csv' and 'md' alongside existing formats.\n6. [ ] Ensure default output is stdout when no path is provided\n   - files: exporter/cli.py\n   - test: tests/test_cli.py checks that when no output path is provided, the formatted data is written to stdout rather than a file.\n",
+  "result": {
+   "calls": 1,
+   "errors": []
+  }
+ }
+}

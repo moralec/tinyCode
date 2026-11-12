@@ -16,11 +16,24 @@ export function trimPiDocs(prompt: string): string {
   return out === prompt ? prompt : out.replace(/^\n+/, "");
 }
 
+/** E4 (limits.terseSystem): Pi's edit rules in one line; its tool list goes (the tool schemas already describe each tool) */
+export const TERSE_RULES = "read, not cat/sed. edit: one call per file; edits[].oldText exact, unique, small, each matched against the original file, none overlapping.";
+const TERSE_WRITE = " write: new files or whole rewrites only.";
+
+/**
+ * E4: Pi's `<tools>` and `<rules>` blocks become one `<rules>` line (TERSE_RULES). Markers not found (another Pi
+ * version, a custom prompt): unchanged.
+ */
+export function terseRules(prompt: string): string {
+  return prompt.replace(/<tools>\n[\s\S]*?<\/tools>\n*<rules>\n[\s\S]*?<\/rules>/, `<rules>\n${TERSE_RULES}${TERSE_WRITE}\n</rules>`);
+}
+
 /**
  * Pi's prompt trimmed, plus the terse line, the tools-first text for the declared workflow tools (config `intercept`;
- * default all, none = no line) and the working method (same text every run, so the cache holds).
+ * default all, none = no line) and the working method (same text every run, so the cache holds). `terse`: E4 (limits.terseSystem).
  */
-export function composePrompt(piPrompt: string, scriptLines: number, tools: readonly string[] = WORKFLOW_TOOLS): string {
+export function composePrompt(piPrompt: string, scriptLines: number, tools: readonly string[] = WORKFLOW_TOOLS, o: { terse?: boolean } = {}): string {
   const first = toolsFirstPrompt(tools);
-  return `${trimPiDocs(piPrompt)}\n\n${tersePrompt(scriptLines)}\n${first ? `${first}\n` : ""}${MEMORY_PROMPT}`;
+  const pi = o.terse ? terseRules(trimPiDocs(piPrompt)) : trimPiDocs(piPrompt);
+  return `${pi}\n\n${tersePrompt(scriptLines)}\n${first ? `${first}\n` : ""}${MEMORY_PROMPT}`;
 }

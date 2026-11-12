@@ -4,19 +4,23 @@
 // /fix's ladder (runFix, with the Adaptive Ladder and rung 3) -> whole suite -> git commit -> mark done in plan.json.
 // A task that fails every rung is marked `blocked` with the diagnosis and the build stops; the next /build resumes at
 // the first task not done. Pure logic with injected dependencies, like fix.ts and plan.ts.
+// Design plan-build-fit, each part off until measured: a task's own check (E21b, stages.buildChecks) is part of its
+// test; stages.wholeCheck (E25) replaces the whole-suite step with the whole-project check and one repair. The check
+// runner (src/acceptance.ts) comes in as BuildDeps.acceptance.
 import { NOOP_PROGRESS, type Progress } from "../progress.ts";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import type { Config } from "../config.ts";
 import { outline, repoFiles } from "../context/outline.ts";
 import type { Message } from "../llm.ts";
 import { applyReply } from "../protocol/apply.ts";
-import { runTests } from "../testrun.ts";
-import { restoreSnapshot, runFix, showFile, type ChatFn, type FixResult, type PiHandoff } from "./fix.ts";
+import { checkFor, noCheck, runTests, type TestConfig } from "../testrun.ts";
+import { handoverText, restoreSnapshot, runFix, showFile, type ChatFn, type FixResult, type PiHandoff } from "./fix.ts";
 import { CACHE_IGNORE, isCachePath, parseTaskFile } from "./cachefiles.ts";
-import { isRelativePath, planMarkdown, validatePlan, type Plan, type PlanTask } from "./plan.ts";
+import { checkArgv, checkLine, isRelativePath, planMarkdown, validatePlan, type Plan, type PlanTask } from "./plan.ts";
+import type { AcceptanceApi, AcceptRun, AcceptSet } from "./acceptapi.ts";
 
 export interface TaskResult {
   solved_by: string;
@@ -50,14 +54,15 @@ export function parseBuildArgs(raw: string): BuildArgs {
 export const planFile = (cwd: string): string => join(cwd, ".tinycode", "plan.json");
 
 /** Read plan.json (validated like /plan's reply) and keep each task's done/blocked/result state. */
-export function loadPlan(cwd: string): { plan: BuildPlan; errors: [] } | { plan: null; errors: string[] } {
+export function loadPlan(cwd: string): { plan: BuildPlan; errors: []; dropped?: string[] } | { plan: null; errors: string[] } {
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(planFile(cwd), "utf8"));
   } catch {
     return { plan: null, errors: ["no .tinycode/plan.json (run /plan first) or it is not valid JSON"] };
   }
-  const v = validatePlan(raw);
+  // E21: a saved check is kept when valid and dropped with a line otherwise; a check never invalidates a plan
+  const v = validatePlan(raw, { checks: "optional", files: repoFiles(cwd) });
   if (!v.plan) return { plan: null, errors: v.errors };
   const rawTasks = ((raw as { tasks?: unknown[] }).tasks ?? []) as Record<string, unknown>[];
   const tasks: BuildTask[] = v.plan.tasks.map((t, i) => {
@@ -67,7 +72,7 @@ export function loadPlan(cwd: string): { plan: BuildPlan; errors: [] } | { plan:
     if (r.result && typeof r.result === "object") out.result = r.result as TaskResult;
     return out;
   });
-  return { plan: { ...v.plan, tasks }, errors: [] };
+  return { plan: { ...v.plan, tasks }, errors: [], ...(v.dropped?.length ? { dropped: v.dropped } : {}) };
 }
 
 export function savePlan(cwd: string, plan: BuildPlan): void {
@@ -86,11 +91,28 @@ export function orchestratorContext(plan: BuildPlan): string {
   return lines.join("\n");
 }
 
-/** The test file a task's test is written to: a path named in `test` (or `files`) that looks like a test, else a default. */
-export function testFileFor(task: PlanTask): string {
+/**
+ * The test file a task's test is written to: a path named in `test` (or `files`) that looks like a test, else a default.
+ * The default is `tests/test_task<id>.py`; with "ts" in `langs` and a .ts/.js first file in a project whose check is
+ * jest, vitest or node:test, it follows that runner (design languages-and-oracles, item 3).
+ */
+export function testFileFor(task: PlanTask, cwd = "", langs: readonly string[] = ["py"], test: TestConfig = { python: "python3", command: null }): string {
   const named = [...task.test.matchAll(/[\w./-]+\.(?:py|js|ts|mjs|cjs)\b/g)].map((m) => m[0]).filter(isRelativePath);
   const looksLikeTest = (p: string) => /test/i.test(p);
-  return named.find(looksLikeTest) ?? task.files.map((f) => parseTaskFile(f).path).find((f) => looksLikeTest(f) && isRelativePath(f)) ?? `tests/test_task${task.id}.py`;
+  const found = named.find(looksLikeTest) ?? task.files.map((f) => parseTaskFile(f).path).find((f) => looksLikeTest(f) && isRelativePath(f));
+  if (found) return found;
+  const first = task.files.length ? parseTaskFile(task.files[0]!).path : "";
+  if (langs.includes("ts") && cwd && /\.(?:ts|js)$/.test(first)) {
+    const check = checkFor(cwd, undefined, langs, test);
+    const stem = posix.basename(first).replace(/\.(?:ts|js)$/, "");
+    const tsconfig = existsSync(join(cwd, "tsconfig.json"));
+    if (!("none" in check) && (check.runner === "jest" || check.runner === "vitest")) {
+      const dir = existsSync(join(cwd, "src")) ? "src/" : "";
+      return `${dir}${stem}.test.${tsconfig || first.endsWith(".ts") ? "ts" : "js"}`;
+    }
+    if (!("none" in check) && check.runner === "node:test") return `test/${stem}.test.${tsconfig ? "ts" : "js"}`;
+  }
+  return `tests/test_task${task.id}.py`;
 }
 
 export const TEST_SYSTEM = `Write the test that defines when one task is done. Test first: the code does not exist yet. Reply ONLY edit blocks for the one test file named in the task, exactly:
@@ -119,11 +141,22 @@ export interface BuildDeps {
   confirm?: (question: string) => Promise<boolean>;
   env?: Record<string, string | undefined>;
   runTests?: typeof runTests;
+  /** the check runner's runAcceptance (design plan-build-fit): task checks (E21b, stages.buildChecks) */
+  acceptance?: AcceptanceApi;
+}
+
+/**
+ * What a build call leaves undone, for the tool's STATUS line: tasks remain and none is blocked (a call for one
+ * task, `task: N`). Without it a 1/9 call read "STATUS: done. Report to user, stop." (runs-night build-1 r1).
+ */
+export function buildRemaining(b: Pick<BuildResult, "blocked" | "done" | "total">): string | undefined {
+  if (b.blocked !== null || b.total === 0 || b.done >= b.total) return undefined;
+  return `${b.total - b.done} task(s) left: call build to continue`;
 }
 
 export interface BuildResult {
   /** per task run in this call, in order */
-  ran: { id: number; status: "done" | "blocked"; solvedBy: string; calls: number; tokens: number }[];
+  ran: { id: number; status: "done" | "blocked"; solvedBy: string; calls: number; tokens: number; /** E25: earlier tasks whose check now fails (information) */ stale?: number[] }[];
   blocked: number | null;
   done: number;
   total: number;
@@ -131,7 +164,22 @@ export interface BuildResult {
   contextChars: number[];
   /** git is in use: commits are made */
   committing: boolean;
+  /** set when no test command could be found (testrun.ts checkFor): the reason; no task ran */
+  none?: string;
   lines: string[];
+}
+
+/**
+ * A blocked /build in a tool run (design plan-build-fit, item 0, a bug fix with no switch): Pi's loop is already
+ * running, so rung 3 only stored its hand-off text. The tool result carries it, as the `fix` tool's does; null when the
+ * build was not blocked or no hand-off was produced.
+ */
+export function blockedHandoff(blocked: number | null, handoff: string | null | undefined): { extra: string; reason: string } | null {
+  if (blocked === null || !handoff) return null;
+  return {
+    extra: `Task ${blocked} blocked; edits undone. Continue by hand: read, edit, run_tests. ${handoverText(handoff)} Then call build for the next task.`,
+    reason: `task ${blocked} blocked; edits undone`,
+  };
 }
 
 function git(cwd: string, args: string[]): string {
@@ -231,6 +279,25 @@ export function fileProblems(cwd: string, task: PlanTask, before: Map<string, st
   return out;
 }
 
+/** E21: seconds a task check's one step may take (the check runner kills the tree after it). */
+export const CHECK_SECONDS = 20;
+/** E25: characters of the failing output a repair prompt carries. */
+export const REPAIR_CHARS = 1200;
+
+/** E21: a task's check as a one-check, one-step set for the runner; `python`/`python3` becomes `{python}` (test.python). */
+export function checkSet(task: PlanTask): AcceptSet | null {
+  const argv = task.check ? checkArgv(task.check) : null;
+  if (!argv?.length) return null;
+  const step = { argv: ["{python}", ...argv.slice(1)], exit: 0, ...(task.expect !== undefined ? { stdoutHas: [task.expect] } : {}) };
+  return { version: 1, request: `task ${task.id} check`, checks: [{ name: `task ${task.id}`, steps: [step] }] };
+}
+
+/** What one /build call carries from task to task. */
+interface BuildState {
+  /** "not run" reasons already reported (one line each) */
+  notRun: Set<string>;
+}
+
 export async function runBuild(args: BuildArgs, deps: BuildDeps): Promise<BuildResult> {
   const { cwd, config: cfg } = deps;
   const env = deps.env ?? process.env;
@@ -247,6 +314,7 @@ export async function runBuild(args: BuildArgs, deps: BuildDeps): Promise<BuildR
     return result;
   }
   const plan = loaded.plan;
+  for (const d of loaded.dropped ?? []) say(d);
   result.total = plan.tasks.length;
   const todo = args.task !== undefined ? plan.tasks.filter((t) => t.id === args.task) : plan.tasks.filter((t) => !t.done);
   if (args.task !== undefined && !todo.length) {
@@ -256,6 +324,12 @@ export async function runBuild(args: BuildArgs, deps: BuildDeps): Promise<BuildR
   if (!todo.length) {
     say(`/build: all ${plan.tasks.length} tasks are done`);
     result.done = plan.tasks.length;
+    return result;
+  }
+  const none = noCheck(cwd, undefined, cfg.languages, cfg.test);
+  if (none) {
+    say(`/build: ${none}`);
+    result.none = none;
     return result;
   }
 
@@ -273,13 +347,14 @@ export async function runBuild(args: BuildArgs, deps: BuildDeps): Promise<BuildR
   const pg = deps.progress ?? NOOP_PROGRESS;
   const labels = todo.map((t, k) => `task ${k + 1}/${todo.length}: ${t.title.slice(0, 40)}`);
   pg.declare(labels);
+  const st: BuildState = { notRun: new Set() };
   for (const [k, task] of todo.entries()) {
     pg.step(labels[k]!);
     const wasBlocked = task.blocked !== undefined;
     delete task.blocked;
     say(`task ${task.id}: ${task.title}`);
     const dirtyBefore = result.committing ? dirtySignatures(cwd) : new Map<string, string>();
-    const out = await runTask(task, plan, deps, env, tests, wasBlocked, say);
+    const out = await runTask(task, plan, deps, env, tests, wasBlocked, say, st);
     if (out.ok) {
       let commit: string | null = null;
       if (result.committing) {
@@ -296,7 +371,7 @@ export async function runBuild(args: BuildArgs, deps: BuildDeps): Promise<BuildR
         calls: out.calls,
         tokens: out.tokens,
         commit,
-        line: `done: solved_by ${out.solvedBy}, ${out.calls} calls, ${out.tokens} tokens${commit ? `, commit ${commit}` : ""}`,
+        line: `done: solved_by ${out.solvedBy}, ${out.calls} calls, ${out.tokens} tokens${commit ? `, commit ${commit}` : ""}${out.stale.length ? `, ${out.stale.map((n) => `stale-check? task ${n}`).join(", ")}` : ""}`,
       };
       say(`task ${task.id} ${task.result.line}`);
     } else {
@@ -306,7 +381,7 @@ export async function runBuild(args: BuildArgs, deps: BuildDeps): Promise<BuildR
     }
     savePlan(cwd, plan);
     result.contextChars.push(orchestratorContext(plan).length);
-    result.ran.push({ id: task.id, status: out.ok ? "done" : "blocked", solvedBy: out.solvedBy, calls: out.calls, tokens: out.tokens });
+    result.ran.push({ id: task.id, status: out.ok ? "done" : "blocked", solvedBy: out.solvedBy, calls: out.calls, tokens: out.tokens, ...(out.stale.length ? { stale: out.stale } : {}) });
     if (!out.ok) {
       result.blocked = task.id;
       break;
@@ -327,6 +402,23 @@ interface TaskOutcome {
   solvedBy: string;
   calls: number;
   tokens: number;
+  /** E25: earlier tasks whose check now fails (information, never a regression) */
+  stale: number[];
+}
+
+/** E21: run one task's check through the check runner (a scratch folder, no shell). */
+async function runTaskCheck(task: PlanTask, deps: BuildDeps): Promise<{ state: "pass" | "fail" | "not run"; why: string }> {
+  const set = checkSet(task);
+  if (!set || !deps.acceptance) return { state: "not run", why: "no check runner" };
+  let run: AcceptRun;
+  try {
+    run = await deps.acceptance.run(set, { cwd: deps.cwd, python: deps.config.test.python, stepSeconds: CHECK_SECONDS });
+  } catch (e) {
+    return { state: "not run", why: (e as Error).message.split("\n")[0] ?? "runner error" };
+  }
+  if (run.unavailable) return { state: "not run", why: run.unavailable };
+  if (run.ok) return { state: "pass", why: "" };
+  return { state: "fail", why: run.failed[0]?.why ?? "failed" };
 }
 
 /** One task in a fresh context: nothing from earlier tasks is passed except the files on disk. */
@@ -338,6 +430,7 @@ async function runTask(
   tests: typeof runTests,
   retry: boolean,
   say: (l: string) => void,
+  st: BuildState,
 ): Promise<TaskOutcome> {
   const { cwd, config: cfg } = deps;
   let calls = 0;
@@ -347,9 +440,18 @@ async function runTask(
     tokens += r.usage.prompt_tokens + r.usage.completion_tokens;
     return r;
   };
-  const stop = (why: string, solvedBy = "none"): TaskOutcome => ({ ok: false, why, solvedBy, calls, tokens });
-  const testFile = testFileFor(task);
+  const stale: number[] = [];
+  const stop = (why: string, solvedBy = "none"): TaskOutcome => ({ ok: false, why, solvedBy, calls, tokens, stale });
+  const testFile = testFileFor(task, cwd, cfg.languages, cfg.test);
   const before = fileStates(cwd, task);
+  const notRun = (what: string, why: string) => {
+    const key = `${what}: ${why}`;
+    if (st.notRun.has(key)) return;
+    st.notRun.add(key);
+    say(`  ${what} not run: ${why}`);
+  };
+  // E21b: the task's own check is part of its definition of done (stages.buildChecks, a check, the runner present)
+  const ownCheck = cfg.stages.buildChecks && task.check !== undefined && deps.acceptance !== undefined;
   // the task's test passing is not enough: every listed file must exist and have been created or changed here.
   // A failure of that check is reported to the ladder as the test's failure, with the reason as its text.
   const base = tests;
@@ -357,9 +459,66 @@ async function runTask(
     const r = await base(o);
     if (!r.ok || o.test === undefined) return r;
     const problems = fileProblems(cwd, task, before);
-    return problems.length ? { ...r, ok: false, text: `FAIL: ${problems.join("; ")}\n${r.text}` } : r;
+    if (problems.length) return { ...r, ok: false, text: `FAIL: ${problems.join("; ")}\n${r.text}` };
+    if (ownCheck) {
+      const c = await runTaskCheck(task, deps);
+      if (c.state === "fail") return { ...r, ok: false, text: `FAIL: check of task ${task.id}: ${c.why}\n${r.text}` };
+      if (c.state === "not run") notRun(`check of task ${task.id}`, c.why);
+    }
+    return r;
   };
-  const header = `Project spec: ${plan.spec}\nStack: ${plan.stack}\nTask ${task.id}: ${task.title}\nFiles to touch: ${task.files.join(", ")} (each must exist when done; a file marked read-only may stay as it is)\nThe test that defines done: ${task.test}`;
+  const header =
+    `Project spec: ${plan.spec}\nStack: ${plan.stack}\nTask ${task.id}: ${task.title}\nFiles to touch: ${task.files.join(", ")} (each must exist when done; a file marked read-only may stay as it is)\nThe test that defines done: ${task.test}` +
+    (cfg.stages.buildChecks && task.check ? `\nCheck: ${checkLine(task)}` : "");
+
+  // E25 (stages.wholeCheck): after the task, the whole suite (hard) and earlier tasks' checks (information). Returns the
+  // failure text of the hard step ("" = it passes).
+  const wholeCheck = async (): Promise<{ hard: string; stale: number[] }> => {
+    const fails: string[] = [];
+    const all = await tests({ cwd, config: cfg.test, langs: cfg.languages });
+    if (!all.ok) fails.push(`the whole suite fails:\n${all.text}`);
+    const now: number[] = [];
+    if (cfg.stages.buildChecks && deps.acceptance)
+      for (const t of plan.tasks) {
+        if (t === task || !t.done || !t.check) continue;
+        const c = await runTaskCheck(t, deps);
+        if (c.state === "fail") {
+          now.push(t.id);
+          say(`  stale-check? task ${t.id}: ${c.why}`);
+        }
+      }
+    return { hard: fails.join("\n"), stale: now };
+  };
+  const finish = async (solvedBy: string): Promise<TaskOutcome> => {
+    const w = await wholeCheck();
+    stale.splice(0, stale.length, ...w.stale);
+    const done = (by: string): TaskOutcome => ({ ok: true, why: "", solvedBy: by, calls, tokens, stale });
+    if (!w.hard) return done(solvedBy);
+    // one repair, with no rung 3 (pi: undefined): the ladder's quick tries only, never Pi's loop
+    const repairText =
+      `Task ${task.id} (${task.title}) broke the whole-project check: ${w.hard.slice(0, REPAIR_CHARS)}\n` +
+      `Earlier checks now failing: ${w.stale.length ? w.stale.map((n) => `task ${n}`).join(", ") : "none"} (if the request now wants different output, say so).\n` +
+      "Make the suite pass without editing tests.";
+    let rep: FixResult;
+    const fp = (deps.progress ?? NOOP_PROGRESS).nest("fix");
+    try {
+      rep = await runFix({ task: repairText, undo: false, reproduce: false }, { cwd, config: cfg, chat, pi: undefined, report: () => {}, env, runTests: tests, progress: fp });
+    } catch (e) {
+      return stop(`the whole-project check fails after this task; repair error: ${(e as Error).message}`, solvedBy);
+    } finally {
+      fp.end();
+    }
+    calls += rep.calls;
+    say(`  repair: solved_by ${rep.solvedBy}, ${rep.calls} calls`);
+    let after = w;
+    if (rep.solvedBy !== "none") {
+      after = await wholeCheck();
+      stale.splice(0, stale.length, ...after.stale);
+      if (!after.hard) return done(`repair:${rep.solvedBy}`);
+    }
+    restoreSnapshot(cwd, env); // the repair's edits are undone; the tree is as the task left it
+    return stop(`the whole-project check fails after this task (one repair tried):\n${after.hard}`, solvedBy);
+  };
 
   // 1. the test, written first (a blocked task keeps the test it already has)
   if (!(retry && existsSync(join(cwd, testFile)))) {
@@ -369,7 +528,7 @@ async function runTask(
       {
         role: "user",
         content:
-          `Repository outline:\n${outline(cwd)}\n\n${header}\n\nWrite the test in ${testFile}.` +
+          `Repository outline:\n${outline(cwd, undefined, cfg.languages)}\n\n${header}\n\nWrite the test in ${testFile}.` +
           (exists ? `\n\nIt already exists:\n${showFile(cwd, testFile)}\nAdd this task's test to it.` : "") +
           "\n\nEdit blocks only.",
       },
@@ -379,7 +538,7 @@ async function runTask(
     for (let attempt = 0; attempt < 2 && !wrote; attempt++) {
       calls++;
       const r = await chat("edit", msgs, { workflow: "build", config: cfg, env });
-      const res = await applyReply(r.text, { cwd, protected: others, env });
+      const res = await applyReply(r.text, { cwd, protected: others, env, langs: cfg.languages });
       // the protected list covers files that exist; a new file other than the test is removed again
       for (const p of res.applied) if (p !== testFile) rmSync(join(cwd, p), { force: true });
       wrote = res.applied.includes(testFile);
@@ -390,7 +549,7 @@ async function runTask(
   }
 
   // 2. it must fail before the code exists
-  const first = await tests({ cwd, test: testFile, config: cfg.test });
+  const first = await tests({ cwd, test: testFile, config: cfg.test, langs: cfg.languages });
   if (first.ok) {
     say("  the test already passes; nothing to build for this task");
   } else {
@@ -399,7 +558,8 @@ async function runTask(
     let fix: FixResult;
     const fp = (deps.progress ?? NOOP_PROGRESS).nest("fix");
     try {
-      fix = await runFix({ test: testFile, undo: false, task: fixTask }, { cwd, config: cfg, chat, pi: cfg.ladder.rung3 ? deps.pi : undefined, report: () => {}, env, runTests: tests, progress: fp });
+      const files = task.files.map(parseTaskFile).filter((f) => !f.readOnly && isRelativePath(f.path) && f.path !== testFile).map((f) => f.path);
+      fix = await runFix({ test: testFile, undo: false, task: fixTask, files }, { cwd, config: cfg, chat, pi: cfg.ladder.rung3 ? deps.pi : undefined, report: () => {}, env, runTests: tests, progress: fp });
     } catch (e) {
       return stop(`fix error: ${(e as Error).message}`);
     } finally {
@@ -411,12 +571,14 @@ async function runTask(
       restoreSnapshot(cwd, env); // a blocked task leaves the tree as it was before the ladder (its test stays)
       return stop(fix.diagnosis ?? "every rung failed and no diagnosis was produced");
     }
-    // 4. no regressions
-    const all = await tests({ cwd, config: cfg.test });
+    // 4. no regressions (E25: the whole-project check and one repair)
+    if (cfg.stages.wholeCheck) return finish(fix.solvedBy);
+    const all = await tests({ cwd, config: cfg.test, langs: cfg.languages });
     if (!all.ok) return stop(`the whole suite fails after this task:\n${all.text}`, fix.solvedBy);
-    return { ok: true, why: "", solvedBy: fix.solvedBy, calls, tokens };
+    return { ok: true, why: "", solvedBy: fix.solvedBy, calls, tokens, stale };
   }
-  const all = await tests({ cwd, config: cfg.test });
+  if (cfg.stages.wholeCheck) return finish("already");
+  const all = await tests({ cwd, config: cfg.test, langs: cfg.languages });
   if (!all.ok) return stop(`the whole suite fails:\n${all.text}`);
-  return { ok: true, why: "", solvedBy: "already", calls, tokens };
+  return { ok: true, why: "", solvedBy: "already", calls, tokens, stale };
 }

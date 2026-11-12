@@ -14,8 +14,10 @@ export interface FileBlock {
 }
 
 // tc0.BLOCK, re.S -> [\s\S]. Group 1 = path line, optionally followed by a ``` fence line.
+// A doubled `<<<<<<< SEARCH` or `>>>>>>> REPLACE` line (the model repeats the marker) counts once: otherwise the second
+// SEARCH line became the text to find and nothing was written (fix-6's reproduction test, runs-fix 2026-11-11).
 const BLOCK_SOURCE =
-  "([^\\n`]+?)\\s*\\n(?:```[^\\n]*\\n)?<<<<<<< SEARCH\\n([\\s\\S]*?)\\n?=======\\n([\\s\\S]*?)\\n?>>>>>>> REPLACE";
+  "([^\\n`]+?)\\s*\\n(?:```[^\\n]*\\n)?<<<<<<< SEARCH\\n(?:<<<<<<< SEARCH\\n)*([\\s\\S]*?)\\n?=======\\n([\\s\\S]*?)\\n?>>>>>>> REPLACE(?:\\n>>>>>>> REPLACE)*";
 
 export function normalizeEol(text: string): string {
   return text.replace(/\r\n/g, "\n");
@@ -31,11 +33,19 @@ export function cleanPath(raw: string): string {
     .replace(/\\/g, "/");
 }
 
+/**
+ * A doubled divider: the model closes REPLACE with a second `=======` before `>>>>>>> REPLACE`. The lazy match leaves
+ * that line at the end of REPLACE, so a new file ended in "=======" (a syntax error). Every /build task-1 try recorded
+ * by 2026-11-11 (7 replies on build-1/build-3), one matrix reply and two October goldens (gemma-4-12b, qwen3.5-4b) did
+ * this; no recorded reply needs the line kept.
+ */
+const DOUBLED_DIVIDER = /(?:^|\n)=======$/;
+
 export function parseBlocks(reply: string): EditBlock[] {
   return [...normalizeEol(reply).matchAll(new RegExp(BLOCK_SOURCE, "g"))].map((m) => ({
     path: cleanPath(m[1]!),
     search: m[2]!,
-    replace: m[3]!,
+    replace: m[3]!.replace(DOUBLED_DIVIDER, ""),
   }));
 }
 

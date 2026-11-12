@@ -1,0 +1,68 @@
+{"task": "t02-duration", "text": "parse_duration('1h30m') returns 30 instead of 5400", "expect": "fix", "file": "timeparse.py", "kind": "fix"}
+{"task": "t04-intervals", "text": "merging [1,3] and [3,5] should give one interval but I get two", "expect": "fix", "file": null, "kind": "fix"}
+{"task": "t06-inventory", "text": "Traceback (most recent call last):\n  File \"inventory.py\", line 41, in remove\n    self.items[sku] -= qty\nKeyError: 'A-12'", "expect": "fix", "file": "inventory.py", "kind": "fix"}
+{"task": "t10-calendar", "text": "1900 is being treated as a leap year", "expect": "fix", "file": null, "kind": "fix"}
+{"task": "t08-config-env", "text": "PORT from the environment is ignored, server always starts on 8000", "expect": "fix", "file": null, "kind": "fix"}
+{"task": "t05-stats", "text": "median of an even-length list is off", "expect": "fix", "file": null, "kind": "fix"}
+{"task": "t01-paginate", "text": "the last page is missing when the count divides evenly", "expect": "fix", "file": null, "kind": "fix"}
+{"task": "r2-05-todo-priority", "text": "make the tests in tests/test_task.py pass", "expect": "fix", "file": null, "kind": "fix"}
+{"task": "t03-slugify", "text": "slugify leaves double dashes when there are two spaces, it used to work last week", "expect": "fix", "file": "textutil.py", "kind": "fix"}
+{"task": "t09-ledger-big", "text": "payroll totals are wrong after the tax change in ledger/payroll.py", "expect": "fix", "file": "ledger/payroll.py", "kind": "fix"}
+{"task": "t07-rename", "text": "rename total_price to subtotal everywhere", "expect": "edit", "file": null, "kind": "multi-file"}
+{"task": "t07-rename", "text": "the discount argument should be a percentage not a fraction, update every caller", "expect": "edit", "file": null, "kind": "multi-file"}
+{"task": "r2-06-money-move", "text": "move the money helpers into shop/ and fix the imports across the project", "expect": "edit", "file": null, "kind": "multi-file"}
+{"task": "t09-ledger-big", "text": "replace the float amounts with Decimal in every ledger module", "expect": "edit", "file": null, "kind": "multi-file"}
+{"task": "r2-04-exporter-csv", "text": "rename the settings module to config and update all references", "expect": "edit", "file": null, "kind": "multi-file"}
+{"task": "t09-ledger-big", "text": "split ledger/invoice.py into invoice and invoice_lines", "expect": "edit", "file": "ledger/invoice.py", "kind": "edit"}
+{"task": "t03-slugify", "text": "make slugify accept a max length", "expect": "edit", "file": "textutil.py", "kind": "edit"}
+{"task": "t08-config-env", "text": "change the default host in app/config.py to 0.0.0.0", "expect": "edit", "file": "app/config.py", "kind": "edit"}
+{"task": "t04-intervals", "text": "refactor merge in intervals.py so it doesn't sort in place", "expect": "edit", "file": "intervals.py", "kind": "edit"}
+{"task": "t05-stats", "text": "add a new function mode() to stats.py", "expect": "add", "file": "stats.py", "kind": "add"}
+{"task": "r2-04-exporter-csv", "text": "add a new --pretty flag to the exporter cli", "expect": "add", "file": null, "kind": "add"}
+{"task": "t06-inventory", "text": "implement a new method restock(sku, qty) on Inventory", "expect": "add", "file": null, "kind": "add"}
+{"task": "t02-duration", "text": "create a helper that formats seconds back into 1h30m style", "expect": "add", "file": null, "kind": "add"}
+{"task": "t01-paginate", "text": "write tests for pager.py", "expect": "test", "file": "pager.py", "kind": "test"}
+{"task": "t10-calendar", "text": "add unit tests for cal/months.py, especially february", "expect": "test", "file": "cal/months.py", "kind": "test"}
+{"task": "r2-03-invoice-keyerror", "text": "we need more tests around pricing", "expect": "test", "file": null, "kind": "test"}
+{"task": "t04-intervals", "text": "generate pytest tests for the edge cases of merge", "expect": "test", "file": null, "kind": "test"}
+{"task": "t05-stats", "text": "add docstrings to stats.py", "expect": "doc", "file": "stats.py", "kind": "doc"}
+{"task": "t09-ledger-big", "text": "write doc comments for the public functions in ledger/loan.py", "expect": "doc", "file": "ledger/loan.py", "kind": "doc"}
+{"task": "r2-01-orders-monthly", "text": "update the readme, it still says monthly only", "expect": "readme", "file": null, "kind": "readme"}
+{"task": "t08-config-env", "text": "write a README explaining the env variables", "expect": "readme", "file": null, "kind": "readme"}
+{"task": "t09-ledger-big", "text": "how does ledger/journal.py work?", "expect": "explain", "file": "ledger/journal.py", "kind": "explain"}
+{"task": "r2-05-todo-priority", "text": "what does todo/storage.py do?", "expect": "explain", "file": "todo/storage.py", "kind": "explain"}
+{"task": "r2-03-invoice-keyerror", "text": "review billing/invoice.py", "expect": "review", "file": "billing/invoice.py", "kind": "review"}
+{"task": "t09-ledger-big", "text": "audit ledger/payment.py for rounding problems", "expect": "review", "file": "ledger/payment.py", "kind": "review"}
+{"task": "r2-02-textstats-words", "text": "look over tokenize.py before I merge", "expect": "review", "file": "textstats/tokenize.py", "kind": "review"}
+{"task": "t01-paginate", "text": "build me a small cli tool that paginates a csv file", "expect": "plan", "file": null, "kind": "plan"}
+{"task": "t03-slugify", "text": "create a web app where people paste text and get a slug back", "expect": "plan", "file": null, "kind": "plan"}
+{"task": "t05-stats", "text": "write a script that reads numbers from stdin and prints summary stats", "expect": "plan", "file": null, "kind": "plan"}
+{"task": "t10-calendar", "text": "I want to make a game where you guess the day of the week for a date", "expect": "plan", "file": null, "kind": "plan"}
+{"task": "t02-duration", "text": "is there a library for parsing human durations like 1h30m?", "expect": "research", "file": null, "kind": "research"}
+{"task": "t08-config-env", "text": "compare pydantic-settings and environs for config loading", "expect": "research", "file": null, "kind": "research"}
+{"task": "t06-inventory", "text": "how do others model stock reservations in inventory systems", "expect": "research", "file": null, "kind": "research"}
+{"task": "t04-intervals", "text": "what's the difference between a list and a tuple?", "expect": "ask", "file": null, "kind": "ask"}
+{"task": "t05-stats", "text": "how do I compute a weighted average in python", "expect": "ask", "file": null, "kind": "ask"}
+{"task": "t08-config-env", "text": "should I use dataclasses or attrs?", "expect": "ask", "file": null, "kind": "ask"}
+{"task": "t01-paginate", "text": "ok", "expect": "none", "file": null, "kind": "none"}
+{"task": "t03-slugify", "text": "nice, that worked", "expect": "none", "file": null, "kind": "none"}
+{"task": "t07-rename", "text": "let me think about it", "expect": "none", "file": null, "kind": "none"}
+{"task": "t02-duration", "text": "arregla parse_duration, devuelve 30 en vez de 5400 para '1h30m'", "expect": "fix", "file": "timeparse.py", "kind": "non-english"}
+{"task": "t05-stats", "text": "añade una función mode() a stats.py", "expect": "add", "file": "stats.py", "kind": "non-english"}
+{"task": "t01-paginate", "text": "explica cómo funciona pager.py", "expect": "explain", "file": "pager.py", "kind": "non-english"}
+{"task": "t03-slugify", "text": "écris des tests pour textutil.py", "expect": "test", "file": "textutil.py", "kind": "non-english"}
+{"task": "t04-intervals", "text": "la fusion des intervalles est cassée quand ils se touchent", "expect": "fix", "file": null, "kind": "non-english"}
+{"task": "t10-calendar", "text": "benenne leap.py in leapyear.py um und passe alle Imports an", "expect": "edit", "file": null, "kind": "non-english"}
+{"task": "t06-inventory", "text": "revise o inventory.py antes do merge", "expect": "review", "file": "inventory.py", "kind": "non-english"}
+{"task": "t08-config-env", "text": "crea una app de línea de comandos para gestionar variables de entorno", "expect": "plan", "file": null, "kind": "non-english"}
+{"task": "t02-duration", "text": "plz fix timeparse its broke", "expect": "fix", "file": "timeparse.py", "kind": "informal"}
+{"task": "t05-stats", "text": "stats.py -> needs stdev", "expect": "add", "file": "stats.py", "kind": "informal"}
+{"task": "t07-rename", "text": "cart total off by a cent sometimes??", "expect": "fix", "file": null, "kind": "informal"}
+{"task": "t09-ledger-big", "text": "ledger budget thing blows up on empty months", "expect": "fix", "file": null, "kind": "informal"}
+{"task": "r2-05-todo-priority", "text": "todo list cli: sort by due date pls", "expect": "edit", "file": null, "kind": "informal"}
+{"task": "t06-inventory", "text": "inventory.py: tests pls", "expect": "test", "file": "inventory.py", "kind": "informal"}
+{"task": "t04-intervals", "text": "fix the bug and add tests for intervals.py", "expect": "fix", "file": "intervals.py", "kind": "ambiguous"}
+{"task": "t08-config-env", "text": "explain why PORT is ignored and fix it", "expect": "fix", "file": null, "kind": "ambiguous"}
+{"task": "t10-calendar", "text": "is cal/leap.py correct for 2100?", "expect": "none", "file": null, "kind": "ambiguous"}
+{"task": "r2-01-orders-monthly", "text": "can you make report.py faster", "expect": "edit", "file": "orders/report.py", "kind": "ambiguous"}
+{"task": "t09-ledger-big", "text": "what would break if I removed ledger/asset.py?", "expect": "none", "file": null, "kind": "ambiguous"}

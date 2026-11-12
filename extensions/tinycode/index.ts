@@ -3,7 +3,8 @@ import { formatAdaptive, readRuns } from "../../src/adaptive.ts";
 import { DEFAULT_CONTEXT_WINDOW, loadConfig, configPath, type Config, type Lane } from "../../src/config.ts";
 import { findAnswer, registerBranchTools, registerTodoTool } from "../../src/branch.ts";
 import { chat, SESSION } from "../../src/llm.ts";
-import { createLimits, readCutMarker, sizeTokens, toolCallVerdict, usableTokens, windowHash, withTail } from "../../src/limits.ts";
+import { repoFiles } from "../../src/context/outline.ts";
+import { createLimits, logShadow, readCutMarker, SHELL_TOOLS, sizeTokens, toolCallVerdict, usableTokens, windowHash, withTail, type Msg } from "../../src/limits.ts";
 import { buildNote, Checkpointer, milestoneOf, requestStart, requestText, touchedFiles } from "../../src/checkpoint.ts";
 import { parseCounts } from "../../src/testrun.ts";
 import { existsSync, readFileSync } from "node:fs";
@@ -15,10 +16,11 @@ import { confirmFor, explicitlyAsked, isDev, modeState, parseDevArgs, setMode } 
 import { CUSTOM_SAY, entersRawWork, forTool, intercepts, isWorkflowTool, registerWorkflowTools, ToolDiet, toolSet, ToolsFirst, triage, type ToolOutcome, type ToolRunner, type WorkflowTool } from "../../src/tools.ts";
 import { composePrompt } from "../../src/prompt.ts";
 import { contextFileLimit, digestDir, makeSummarize, shrinkContextFiles } from "../../src/context/digest.ts";
-import { BestTree, LOOP_SLOT, rewriteNudge } from "../../src/besttree.ts";
+import { BestTree, LOOP_SLOT, rewriteNudge, SAME_FAILURE_RUNS, START_SLOT } from "../../src/besttree.ts";
 import { endProgress, live, startProgress, uiSink } from "../../src/progress-ui.ts";
 import { createProgress, type Progress, type Summary } from "../../src/progress.ts";
-import { BUILD_PHASES, parseBuildArgs, runBuild } from "../../src/workflows/build.ts";
+import { blockedHandoff, BUILD_PHASES, buildRemaining, parseBuildArgs, runBuild } from "../../src/workflows/build.ts";
+import { loadAcceptanceModule } from "../../src/workflows/acceptapi.ts";
 import { Compactor } from "../../src/compact.ts";
 import { loadPrepareCompaction, runPiCompact } from "../../src/picompact.ts";
 import { compact as piCompact, convertToLlm } from "@earendil-works/pi-coding-agent";
@@ -34,10 +36,37 @@ import { DOC_PHASES, docArgsFromText, parseDocArgs, readmeHeadingLevels, runDoc,
 import { findReadme, README_PHASES, README_UPDATE_PHASES } from "../../src/workflows/docreadme.ts";
 import { EDIT_PHASES, parseEditArgs, runEdit } from "../../src/workflows/edit.ts";
 import { PLAN_PHASES, parsePlanArgs, runPlan } from "../../src/workflows/plan.ts";
-import { formatResearch, parseResearchArgs, RESEARCH_PHASES, runResearch } from "../../src/workflows/research.ts";
+import { formatResearch, GROUNDED_CHECK, NO_QUOTED_FACT, parseResearchArgs, RESEARCH_PHASES, runResearch } from "../../src/workflows/research.ts";
 import { parseReviewArgs, REVIEW_PHASES, runReview } from "../../src/workflows/review.ts";
 import { FIX_PHASES, handoverText, isTestPath, parseFixArgs, restoreSnapshot, runFix, takeSnapshot, treeHash, undoDir, undoFix, type PiHandoff } from "../../src/workflows/fix.ts";
 import { guardLine, pyParseError, rewriteFindings } from "../../src/rewriteguard.ts";
+import { BASH_TEST_ARM, bashTestSeconds, isTestCommand, TestClock } from "../../src/testrun.ts";
+
+/**
+ * Loop guards 2 (docs/designs/loop-guards-2/design.md): state that lives for one request and is reset at every request
+ * boundary (the new-request branch of before_agent_start, and the start of each typed workflow command): E24's test
+ * clock; E22's flag that the request's `.start` snapshot was taken (tracked with the key off too, for the shadow line;
+ * the snapshot itself only with limits.startOver), and when the request started (the shadow line's time).
+ */
+const boundary = { clock: new TestClock(), startTaken: false, started: Date.now() };
+const newBoundary = (): void => {
+  boundary.clock.reset();
+  boundary.startTaken = false;
+  boundary.started = Date.now();
+};
+/** E22: the calls that can change the tree; the `.start` snapshot is taken just before the first of them in a request */
+const TREE_CHANGING = new Set(["edit", "write", ...SHELL_TOOLS, "fix", "add", "edit_file", "build"]);
+const takeStart = (cfg: Config, cwd: string): void => {
+  if (boundary.startTaken) return;
+  boundary.startTaken = true;
+  if (!cfg.limits.startOver || !cfg.limits.loopBestTree) return;
+  try {
+    takeSnapshot(cwd, cfg.languages, process.env, START_SLOT);
+  } catch {
+    // no snapshot: `to: "start"` then says "No snapshot found."; the run goes on
+  }
+};
+const shadowLog = (step: string, on: boolean, status: string): void => logShadow(SESSION, step, on, status);
 
 export default function (pi: ExtensionAPI) {
   let cfg: Config;
@@ -76,15 +105,19 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  const tm = toolManager(pi, cfg.limits.stuckTestRuns, cfg.limits.autoContinue, cfg.limits.undoWorse, cfg.limits.undoWorseFrom, cfg.limits.loopBestTree, cfg.limits.restoreToolAlways);
+  const tm = toolManager(pi, cfg.limits.stuckTestRuns, cfg.limits.autoContinue, cfg.limits.undoWorse, cfg.limits.undoWorseFrom, cfg.limits.loopBestTree, cfg.limits.restoreToolAlways, cfg.limits.startOver);
   registerBranchTools(pi, cfg, {
     tree: tm.best,
-    snapshot: (cwd) => void takeSnapshot(cwd, process.env, LOOP_SLOT),
+    snapshot: (cwd) => void takeSnapshot(cwd, cfg.languages, process.env, LOOP_SLOT),
     restore: (cwd) => restoreSnapshot(cwd, process.env, LOOP_SLOT),
     // undo a worse run at once (limits.undoWorse): never a test file
     undo: cfg.limits.undoWorse ? (cwd) => restoreSnapshot(cwd, process.env, LOOP_SLOT, isTestPath) : undefined,
     onFirstBest: () => tm.sync(),
-  });
+    // E22 (limits.startOver): the request's original tree, tests left alone; only a snapshot taken in this request
+    restoreStart: (cwd) => (boundary.startTaken ? restoreSnapshot(cwd, process.env, START_SLOT, isTestPath) : null),
+    startTaken: () => boundary.startTaken,
+    onStartTrigger: (c) => shadowLog("start_over", cfg.limits.startOver && cfg.limits.loopBestTree, `same failure ${SAME_FAILURE_RUNS} runs (${c.passed}/${c.passed + c.failed}); ${Math.round((Date.now() - boundary.started) / 1000)}s into the request`),
+  }, { clock: boundary.clock, shadow: shadowLog });
   const loop = wireLimits(pi, cfg, tm);
   registerFix(pi, cfg, loop);
   registerEdit(pi, cfg, loop);
@@ -147,8 +180,8 @@ function registerDev(pi: ExtensionAPI): void {
  * limits.restoreToolAlways, E12: the tool list then never changes mid-run). Every call is safe: an
  * older Pi without the tool-set API simply keeps all tools.
  */
-function toolManager(pi: ExtensionAPI, stuckTestRuns: number, autoContinue: number, undoWorse = false, undoWorseFrom = 1, keepBest = true, restoreAlways = false) {
-  const best = new BestTree(stuckTestRuns, autoContinue, undoWorse, undoWorseFrom, keepBest);
+function toolManager(pi: ExtensionAPI, stuckTestRuns: number, autoContinue: number, undoWorse = false, undoWorseFrom = 1, keepBest = true, restoreAlways = false, startOver = false) {
+  const best = new BestTree(stuckTestRuns, autoContinue, undoWorse, undoWorseFrom, keepBest, startOver);
   const diet = new ToolDiet();
   let baseline: string[] | null = null;
   const sync = (): void => {
@@ -207,11 +240,17 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     onHandoff: (h, changed, cwd) => {
       // a hand-over: the files the workflow wrote are read whole once, and its tree is the loop's first best
       for (const f of changed) lim.fresh.add(f);
-      tm.best.seed(h.tree, () => void takeSnapshot(cwd, process.env, LOOP_SLOT));
+      tm.best.seed(h.tree, () => void takeSnapshot(cwd, cfg.languages, process.env, LOOP_SLOT));
       tm.sync();
     },
+    // E27 rule 3 (limits.retirePlan; off: the shadow line only)
+    retirePlan: () => void lim.retirePlan(lastContext),
   };
+  /** the last message list the context handler sent on (before masking) */
+  let lastContext: Msg[] = [];
   const wholeReads = new Set<string>();
+  /** E24: shell test commands in flight (tool call id -> start and the limit in seconds, the arm's when the key is off) */
+  const bashTests = new Map<string, { start: number; seconds: number }>();
   /** whole-file rewrites once tests pass (C21): tool call id -> the file's absolute path, for the rewrite guard (E1) */
   const rewrites = new Map<string, string>();
 
@@ -271,7 +310,7 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
   const modelId = (ctx: ExtensionContext | undefined): string => ctx?.model?.id ?? "";
   const routeOnce = async (text: string, cwd: string): Promise<Routed> => {
     if (routedOnce?.text === text) return routedOnce.r;
-    const r = await route(text, indexFor(cwd), chat, cfg.route.model);
+    const r = await route(text, indexFor(cwd), chat, cfg.route.model, cfg.languages);
     routedOnce = { text, r };
     return r;
   };
@@ -303,6 +342,7 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     async (messages, maxTokens) => (await chat("digest", messages, { workflow: "digest", maxTokens, config: cfg })).text,
     Math.floor((digestLane?.contextWindow ?? DEFAULT_CONTEXT_WINDOW) * 0.5 * cfg.ladder.charsPerToken),
   );
+  const restoreBest = (cwd: string) => restoreSnapshot(cwd, process.env, LOOP_SLOT);
   pi.on("before_agent_start", async (e, ctx) => {
     const ctxFiles = shrinkContextFiles(e.systemPrompt, {
       maxTokens: contextFileLimit(cfg.limits.contextFileTokens, cfg.limits.contextFileShare, ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW),
@@ -311,7 +351,7 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
       onDigest: (path, ok, detail) => { if (ctx.hasUI) ctx.ui.notify(ok ? `tinyCode: ${path} digest ready, ${detail}` : `tinyCode: ${path} digest failed (${detail}); outline stays`, ok ? "info" : "warning"); },
     });
     // the tools-first line names only the intercepted workflow tools (config `intercept`)
-    const systemPrompt = composePrompt(ctxFiles.prompt, cfg.limits.scriptLines, cfg.intercept);
+    const systemPrompt = composePrompt(ctxFiles.prompt, cfg.limits.scriptLines, cfg.intercept, { terse: cfg.limits.terseSystem });
     const text = String((e as { prompt?: string }).prompt ?? "").trim();
     if (text && !insideWorkflow()) modeState.lastPrompt = text;
     // not for a workflow's own hand-off (rung 3), not for slash commands, not for an empty prompt
@@ -322,8 +362,10 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     edited = false;
     lim.fresh.clear();
     wholeReads.clear();
+    bashTests.clear();
     rewrites.clear();
     tm.newRequest();
+    newBoundary(); // loop guards 2: E24's clock
     ckpt.reset();
     editedSinceTests = false;
     lastTestText = "";
@@ -345,6 +387,7 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
         const b = scopeBefore(text, indexFor(ctx.cwd).files, read);
         return () => scopeAfter(b, indexFor(ctx.cwd).files, read);
       };
+      if (TREE_CHANGING.has(p.call.tool)) takeStart(cfg, ctx.cwd); // E22: before a direct run that can change the tree
       const res = await runDirect({ show: (s) => showSay(ctx, s), run: (c) => ctl.runTool!(c.tool, c.params, ctx), scope }, p.call);
       doneGuard.record(res.call.tool, res.status, targetOf(res.call.params));
       if (entersRawWork({ tool: res.call.tool, text: res.text })) tm.enterRaw();
@@ -393,12 +436,13 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
   // c35db37: no follow-up). The continuation has no prompt, so before_agent_start does not treat it as a new request.
   pi.on("agent_before_settle", (e, ctx) => {
     if (e.outcome !== "completed" || insideWorkflow()) return undefined;
+    const msg = (content: string) => ({ type: "custom_message" as const, customType: CUSTOM_CONTINUE, content, display: true });
     // a plain request (not intercepted) that only looked at failing tests (explain, review) is not told to continue
     const more = plain && !edited ? null : tm.best.continueLine();
-    if (more) return { entries: [{ type: "custom_message" as const, customType: CUSTOM_CONTINUE, content: more, display: true }], continue: true };
+    if (more) return { entries: [msg(more)], continue: true };
     // ending for good: never below the best tree (src/besttree.ts endRestore)
-    const back = tm.best.endRestore(() => restoreSnapshot(ctx.cwd, process.env, LOOP_SLOT));
-    return back ? { entries: [{ type: "custom_message" as const, customType: CUSTOM_CONTINUE, content: back, display: true }] } : undefined;
+    const back = tm.best.endRestore(() => restoreBest(ctx.cwd));
+    return back ? { entries: [msg(back)] } : undefined;
   });
 
   pi.on("turn_end", () => {
@@ -428,11 +472,17 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
     }
     if (isDev() && ctx.hasUI && firstRec) ctx.ui.notify(`dev: tools-first ${firstRec.tools_first} (first call ${firstRec.first}, hint ${firstRec.hint ?? "none"}${nudge ? ", nudged" : ""})`, "info");
     if (!insideWorkflow() && entersRawWork({ call: e.toolName })) tm.enterRaw();
+    // E22: the request's original tree, just before its first change (not inside a typed command's own loop)
+    if (!insideWorkflow() && TREE_CHANGING.has(e.toolName)) takeStart(cfg, ctx.cwd);
     if (e.toolName === "write") {
       const target = resolve(ctx.cwd, String((e.input as Record<string, unknown>).path ?? (e.input as Record<string, unknown>).file_path ?? ""));
       if (cfg.limits.rewriteNudge && rewriteNudge("write", existsSync(target), tm.best.has)) rewrites.set(e.toolCallId, target);
     }
+    // E24's shadow: a shell test command with no timeout of its own is timed until its result (tool_result below)
+    const inp = e.input as Record<string, unknown>;
+    const shellTest = SHELL_TOOLS.includes(e.toolName) && (inp.timeout === undefined || inp.timeout === null) && isTestCommand(String(inp.command ?? ""));
     const v = toolCallVerdict(lim, cfg.limits, e.toolName, e.input as Record<string, unknown>, {
+      testSeconds: () => bashTestSeconds(cfg.limits, boundary.clock),
       resolvePath: (p) => resolve(ctx.cwd, p),
       windowHash: (p, offset, limit) => {
         try {
@@ -450,6 +500,7 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
       },
     });
     if (v.action === "allow" && v.whole) wholeReads.add(e.toolCallId);
+    if (v.action === "allow" && shellTest) bashTests.set(e.toolCallId, { start: Date.now(), seconds: Number(inp.timeout ?? 0) || BASH_TEST_ARM });
     return v.action === "allow" ? undefined : { block: true, reason: v.reason };
   });
 
@@ -471,6 +522,12 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
   };
 
   pi.on("tool_result", (e, ctx) => {
+    // E24 (limits.bashTestSeconds): a shell test command that ran to its limit (on: Pi killed it; off: the arm's 120 s)
+    const timedTest = bashTests.get(e.toolCallId);
+    if (timedTest && bashTests.delete(e.toolCallId)) {
+      const secs = Math.round((Date.now() - timedTest.start) / 1000);
+      if (secs >= timedTest.seconds) shadowLog("bash_test_timeout", cfg.limits.bashTestSeconds > 0, `${String(e.input.command ?? "").replace(/\s+/g, " ").slice(0, 80)}: ${secs}s, limit ${timedTest.seconds}s`);
+    }
     // forgiving edits (src/forgive.ts): a failed Pi edit with a whitespace-only miss is applied here, a duplicate is located
     const forgiven = cfg.limits.forgiveEdits && e.toolName === "edit" && e.isError ? forgiveEdit(ctx.cwd, e.input, e.content) : null;
     const isError = forgiven?.result.kind === "applied" ? false : e.isError;
@@ -488,7 +545,7 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
       lastTestText = parts.map((p) => p.text).join("");
       const kind = milestoneOf(tm.best.verdict, editedSinceTests, parseCounts(lastTestText));
       // the tree is hashed only for a steady milestone (the one the same-tree rule can skip)
-      ckpt.tests(kind, e.toolCallId, kind === "steady" || kind === "best" ? treeHash(ctx.cwd) : undefined);
+      ckpt.tests(kind, e.toolCallId, kind === "steady" || kind === "best" ? treeHash(ctx.cwd, cfg.languages) : undefined);
       if (ckpt.lastSkipped)
         logCall({ ts: new Date().toISOString(), session: SESSION, workflow: "pi", step: "checkpoint_skip", lane: "", model: "", prompt_tokens: 0, cached_tokens: 0, completion_tokens: 0, ms: 0, status: `steady: same tree as the last checkpoint (${ckpt.skipped} this request)` });
       editedSinceTests = false;
@@ -505,7 +562,9 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
       changed = true;
     }
     // a mistyped project path: say where the project is and which file was meant (src/pathhint.ts)
-    const hint = wrongPathHint(ctx.cwd, e.toolName, e.input, isError, text);
+    // the file list only for a failed call, and only when a language adds files to it (otherwise wrongPathHint lists as before)
+    const hintFiles = isError && cfg.languages.includes("ts") ? repoFiles(ctx.cwd, cfg.languages) : undefined;
+    const hint = wrongPathHint(ctx.cwd, e.toolName, e.input, isError, text, hintFiles);
     if (hint) {
       text += `\n${hint}`;
       changed = true;
@@ -564,7 +623,7 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
   pi.on("context", (e, ctx) => {
     // a direct run's result is shown to the model as its own tool's output (assistant sentence + tool call + tool result)
     const m = ctx.model;
-    const turned0 = m ? (asToolTurn(e.messages as never, { id: m.id, provider: m.provider, api: m.api }) as typeof e.messages | undefined) : undefined;
+    const turned0 = m ? (asToolTurn(e.messages as never, { id: m.id, provider: m.provider, api: m.api }, { taskRef: cfg.limits.taskRef }) as typeof e.messages | undefined) : undefined;
     // heartbeats and stuck lines are for the human only
     const shown = dropDisplayOnly((turned0 ?? e.messages) as never) as typeof e.messages;
     const turned = shown !== (turned0 ?? e.messages) ? shown : turned0;
@@ -587,7 +646,8 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
       systemChars: system,
       usableTokens: usable,
       milestones: !lim.stepped,
-      view: (ms) => (lim.stepped ? ms : (lim.masker.view(ms as never) as never)),
+      // E28 (limits.stepBackKeepsMasks): stepped back, the kept masks are still what is sent
+      view: (ms) => (lim.stepped && !cfg.limits.stepBackKeepsMasks ? ms : (lim.masker.view(ms as never) as never)),
       // kept files: the current text on disk, read now (the extension marks these reads as served below)
       fileText: (p) => {
         try {
@@ -626,13 +686,15 @@ function wireLimits(pi: ExtensionAPI, cfg: Config, tm: ReturnType<typeof toolMan
       if (ctx.hasUI) ctx.ui.notify(`tinyCode: checkpoint (${cp.kind}): context ${cp.tokensBefore} -> ${cp.tokensAfter} tokens`, "info");
     }
     const messages = checked ?? unchecked;
+    lastContext = messages as never; // E27 rule 3: retirePlan() reads the plan call ids from the last list sent
     // pressure masking (src/limits.ts): over limits.pressureAt of the window (never above the usable line), old results,
     // long call arguments and long replies are masked (batched). The size counts characters too (sizeTokens), and a kept
     // reply's stale usage is zeroed by the checkpoint, so this also catches what a cut could not take out.
     const pressure = { windowTokens: window, systemChars: system, ceilingTokens: usable };
     let masked = lim.mask(messages as never, pressure);
     // never send a request over the usable line unmasked, not even stepped back (then masking is otherwise off)
-    if (lim.stepped && usable > 0 && sizeTokens(messages as never, system) > usable) masked = lim.masker.apply(messages as never, pressure);
+    // it sizes what would be sent (E28: the kept view; off, `masked` is undefined and this is the unmasked list)
+    masked = lim.backstop(messages as never, masked, usable, pressure);
     const left = sizeTokens((masked ?? messages) as never, system);
     if (usable > 0 && left > usable)
       logCall({ ts: new Date().toISOString(), session: SESSION, workflow: "pi", step: "over_line", lane: "", model: "", prompt_tokens: left, cached_tokens: 0, completion_tokens: 0, ms: 0, status: `${left} tokens after checkpoint and masking, usable ${usable}` });
@@ -699,6 +761,8 @@ interface LoopControl {
   runTool: ToolRunner | undefined;
   /** a hand-over to Pi's loop: the files the workflow changed (absolute) and its tree's counts (src/besttree.ts) */
   onHandoff: (h: PiHandoff, changed: string[], cwd: string) => void;
+  /** E27 rule 3: /build is starting; called once before its first task by every entry point to /build (runBuildTracked here) */
+  retirePlan: () => void;
 }
 
 const START_WAIT_MS = 60_000;
@@ -720,6 +784,8 @@ interface ToolCapture {
   handoff: string | null;
   /** ok but unfinished: what remains (STATUS: partial) */
   remaining?: string;
+  /** ok, check before reporting (STATUS: done. <check>; design research-grounding) */
+  check?: string;
 }
 const newCapture = (): ToolCapture => ({ lines: [], text: "", ok: true, handoff: null });
 
@@ -739,6 +805,7 @@ async function tracked<T>(
   summarize: (r: T, pg: Progress) => Summary,
   tool?: ToolCapture,
 ): Promise<T | undefined> {
+  if (!tool) newBoundary(); // a typed workflow command is a request boundary (loop guards 2)
   const pg = startProgress(pi, ctx, cfg, name, phases, tool !== undefined);
   const report = (line: string) => {
     if (tool) tool.lines.push(line);
@@ -814,7 +881,9 @@ function runFixTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, loo
     pi, cfg, ctx, "fix", FIX_PHASES,
     (r) => runFix(args, { cwd: ctx.cwd, config: cfg, chat: r.chat, progress: r.pg, pi: handoffFor(pi, cfg, ctx, loop, r, tool), report: r.report }),
     (f, pg) =>
-      f.notReproduced
+      f.none
+        ? { outcome: "failed", reason: f.none }
+        : f.notReproduced
         ? { outcome: "blocked", reason: `couldn't reproduce: behaviour already works (test: ${f.notReproduced.test}); test undone, nothing changed`, files: noFiles(pg) }
         : f.solvedBy === "none"
         ? { outcome: "blocked", reason: f.kept ? "no rung solved it; best tree kept" : "no rung solved it", files: noFiles(pg), next: "/fix --undo to revert, or more detail and /fix again" }
@@ -943,7 +1012,9 @@ function runAddTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, loo
     pi, cfg, ctx, "add", ADD_PHASES,
     (r) => runAdd(args, { cwd: ctx.cwd, config: cfg, chat: r.chat, progress: r.pg, pi: handoffFor(pi, cfg, ctx, loop, r, tool), report: r.report }),
     (a, pg) =>
-      a.ok
+      a.none
+        ? { outcome: "failed", reason: a.none }
+        : a.ok
         ? { text: a.target ? `added to ${a.target}${a.test ? ` with ${a.test}` : ""}` : "added", files: a.files.length ? a.files : noFiles(pg), next: "/fix --undo to revert" }
         : a.undone
           ? { outcome: "failed", reason: `${a.undone.why}; /add undid its changes`, files: noFiles(pg) }
@@ -1100,7 +1171,7 @@ function researchFor(cfg: Config, cwd: string, report: (line: string) => void, r
   return async (question: string): Promise<string | null> => {
     const r = await runResearch(
       { question },
-      { config: cfg, chat: run.chat, progress: run.pg, report, find: (q) => findAnswer(cwd, q, { config: cfg, workflow: "research" }) },
+      { config: cfg, chat: run.chat, progress: run.pg, report, cwd, find: (q) => findAnswer(cwd, q, { config: cfg, workflow: "research" }) },
     );
     return r.answer ? formatResearch(r) : null;
   };
@@ -1120,10 +1191,15 @@ function runResearchTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext
   return tracked(
     pi, cfg, ctx, "research", RESEARCH_PHASES,
     async (r) => {
-      const res = await runResearch(args, { config: cfg, chat: r.chat, progress: r.pg, report: r.report, find: (q) => findAnswer(ctx.cwd, q, { config: cfg, workflow: "research" }) });
+      const res = await runResearch(args, { config: cfg, chat: r.chat, progress: r.pg, report: r.report, cwd: ctx.cwd, find: (q) => findAnswer(ctx.cwd, q, { config: cfg, workflow: "research" }) });
       if (args.question) {
         r.report(formatResearch(res));
         r.report(`(${res.steps} steps, ${res.tokens} tokens, ${res.stopped})`);
+      }
+      // E20: a grounded answer asks the model to check its key fact (STATUS done); with no quoted fact it is partial
+      if (tool && cfg.research.grounded && res.answer) {
+        if (res.facts.length) tool.check = GROUNDED_CHECK;
+        else tool.remaining = NO_QUOTED_FACT;
       }
       return res;
     },
@@ -1168,10 +1244,11 @@ function registerBuild(pi: ExtensionAPI, cfg: Config, loop: LoopControl): void {
   });
 }
 
-function runBuildTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, loop: LoopControl, args: Parameters<typeof runBuild>[0], tool?: ToolCapture) {
-  return tracked(
+async function runBuildTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, loop: LoopControl, args: Parameters<typeof runBuild>[0], tool?: ToolCapture) {
+  loop.retirePlan(); // E27 rule 3: the typed /build and the build tool both come here
+  const b = await tracked(
     pi, cfg, ctx, "build", BUILD_PHASES,
-    (r) =>
+    async (r) =>
       runBuild(args, {
         cwd: ctx.cwd,
         config: cfg,
@@ -1180,15 +1257,23 @@ function runBuildTracked(pi: ExtensionAPI, cfg: Config, ctx: ExtensionContext, l
         pi: handoffFor(pi, cfg, ctx, loop, r, tool),
         report: r.report,
         confirm: confirmFor(ctx, { kind: "git-init", explicit: args.yes || (tool !== undefined && explicitlyAsked("git-init", modeState.lastPrompt)), fromTool: tool !== undefined }),
+        // the check runner (design plan-build-fit): task checks (E21b, stages.buildChecks) need the module
+        acceptance: cfg.stages.buildChecks ? ((await loadAcceptanceModule()) ?? undefined) : undefined,
       }),
     (b, pg) =>
-      b.blocked !== null
+      b.none
+        ? { outcome: "failed", reason: b.none }
+        : b.blocked !== null
         ? { outcome: "blocked", reason: `stopped at task ${b.blocked} (${b.done}/${b.total} done)`, files: noFiles(pg), next: "run /build again to resume there" }
         : b.total === 0
           ? { outcome: "failed", reason: "no plan to build", next: "run /plan first" }
           : { text: `${b.done}/${b.total} task(s) done`, next: b.done < b.total ? "run /build to continue" : "review with git log" },
     tool,
   );
+  // tasks left after this call (one task asked for, none blocked): STATUS partial, never "Report to user, stop"
+  const left = b ? buildRemaining(b) : undefined;
+  if (tool && left) tool.remaining = left;
+  return b;
 }
 
 /** Detail lines that are the answer itself (an explanation, a review, a research result, a plan): they go to the model with the summary. */
@@ -1214,7 +1299,8 @@ function registerTools(pi: ExtensionAPI, cfg: Config, loop: LoopControl): void {
     switch (name) {
       case "fix": {
         const r = await runFixTracked(pi, cfg, ctx, loop, { test: opt("test"), undo: false, task: str("task") }, tool);
-        if (r?.solvedBy === "none") {
+        if (r?.none) reason = r.none;
+        else if (r?.solvedBy === "none") {
           // once: a kept tree gets its counts and failing tests (the reviewer's prose describes an earlier tree); an undone tree gets the diagnosis
           extra = r.kept
             ? `${r.kept} Continue by hand: read, edit, run_tests.`
@@ -1253,7 +1339,10 @@ function registerTools(pi: ExtensionAPI, cfg: Config, loop: LoopControl): void {
         break;
       case "build": {
         const n = Number(p.task);
-        await runBuildTracked(pi, cfg, ctx, loop, { task: Number.isInteger(n) && n > 0 ? n : undefined, yes: !ctx.hasUI }, tool);
+        const b = await runBuildTracked(pi, cfg, ctx, loop, { task: Number.isInteger(n) && n > 0 ? n : undefined, yes: !ctx.hasUI }, tool);
+        // a blocked task's ladder hand-off goes to the model, as fix's does (plan-build-fit item 0)
+        const h = blockedHandoff(b?.blocked ?? null, tool.handoff);
+        if (h) ({ extra, reason } = h);
         break;
       }
       case "research":
@@ -1261,7 +1350,7 @@ function registerTools(pi: ExtensionAPI, cfg: Config, loop: LoopControl): void {
         break;
     }
     const detail = ANSWER_TOOLS.has(name) && tool.lines.length ? `\n${tool.lines.join("\n")}` : "";
-    return { text: forTool(`${tool.text || `${name}: no result`}${extra ? `\n${extra}` : ""}${detail}`), ok: tool.ok, ...(reason && !tool.ok ? { reason } : {}), ...(tool.remaining && tool.ok ? { remaining: tool.remaining } : {}) };
+    return { text: forTool(`${tool.text || `${name}: no result`}${extra ? `\n${extra}` : ""}${detail}`), ok: tool.ok, ...(reason && !tool.ok ? { reason } : {}), ...(tool.remaining && tool.ok ? { remaining: tool.remaining } : {}), ...(tool.check && tool.ok ? { check: tool.check } : {}) };
   };
   loop.runTool = runner;
   // only the intercepted workflows are declared to the model (config `intercept`); slash commands run every workflow

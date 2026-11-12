@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { alternate, checkAlternation, needsAlternation, type AltMsg } from "../../src/alternate.ts";
-import { DEFAULTS } from "../../src/config.ts";
 
 const u = (text: string): AltMsg => ({ role: "user", content: [{ type: "text", text }] });
 const a = (text = "", calls = false): AltMsg => ({ role: "assistant", content: [{ type: "text", text }], ...(calls ? { tool_calls: [1] } : {}) });

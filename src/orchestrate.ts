@@ -317,19 +317,26 @@ interface Msg {
   role: string;
   [k: string]: unknown;
 }
+/** E13 (limits.taskRef): what a direct run's `task` argument says instead of the request it repeats word for word */
+export const TASK_REF = "(the request above)";
+const userText = (m: Msg): string =>
+  typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.map((p) => (p && typeof p === "object" && typeof (p as { text?: unknown }).text === "string" ? (p as { text: string }).text : "")).join("") : "";
+
 /**
  * `context` hook: the custom result message becomes an assistant turn (the sentence plus the tool call) followed by that
  * call's tool result, so the model reads the output as its own tool's, not as the user's words. The direct run's own
  * "say" message is dropped (its sentence is inside the assistant turn). Returns undefined when there is nothing to do.
  */
-export function asToolTurn(messages: Msg[], model: { id: string; provider: string; api: string }): Msg[] | undefined {
+export function asToolTurn(messages: Msg[], model: { id: string; provider: string; api: string }, o: { taskRef?: boolean } = {}): Msg[] | undefined {
   const isResult = (m: Msg) => m.role === "custom" && m.customType === CUSTOM_RESULT;
   const isDirectSay = (m: Msg) => m.role === "custom" && m.customType === CUSTOM_SAY_DIRECT && (m.details as { direct?: boolean } | undefined)?.direct === true;
   if (!messages.some((m) => isResult(m) || isDirectSay(m))) return undefined;
   const out: Msg[] = [];
+  let request = "";
   for (const m of messages) {
     if (isDirectSay(m)) continue;
     if (!isResult(m)) {
+      if (m.role === "user") request = userText(m).trim();
       out.push(m);
       continue;
     }
@@ -344,7 +351,7 @@ export function asToolTurn(messages: Msg[], model: { id: string; provider: strin
     const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
     out.push({
       role: "assistant",
-      content: [{ type: "toolCall", id: d.id, name: d.tool, arguments: { intent: d.say, ...d.params } }],
+      content: [{ type: "toolCall", id: d.id, name: d.tool, arguments: { intent: d.say, ...params(d.params, request, o.taskRef === true) } }],
       api: model.api,
       provider: model.provider,
       model: model.id,
@@ -355,6 +362,11 @@ export function asToolTurn(messages: Msg[], model: { id: string; provider: strin
     out.push({ role: "toolResult", toolCallId: d.id, toolName: d.tool, content: [{ type: "text", text }], isError: d.status === "failed", timestamp: ts });
   }
   return out;
+}
+
+/** A direct run's arguments as the model sees them: with taskRef, a `task` that repeats the request just before it is TASK_REF. */
+function params(p: Record<string, string>, request: string, taskRef: boolean): Record<string, string> {
+  return taskRef && request && typeof p.task === "string" && p.task.trim() === request ? { ...p, task: TASK_REF } : p;
 }
 
 /** Custom messages that are for the human only: heartbeats and stuck lines, and the sentence a tool call already carries as its `intent`. */

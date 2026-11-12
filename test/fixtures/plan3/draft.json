@@ -1,0 +1,60 @@
+{
+  "spec": "This plan adds CSV and Markdown output formats to the exporter tool, ensuring they handle missing keys gracefully by outputting empty cells. It introduces a `--fields` CLI option to allow users to select and order specific columns for any format. The `--list-formats` option is updated to include the new formats. Existing JSON output remains untouched to preserve byte-for-byte stability, while the registry and CLI are updated to support the new functionality and default to stdout when no output path is specified.",
+  "stack": "Python, csv, markdown, pytest",
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Implement CSV writer module with header and quoting logic",
+      "files": [
+        "exporter/formats/csv_fmt.py"
+      ],
+      "test": "tests/test_formats.py checks that csv output has a header row derived from the first record's keys, subsequent rows are quoted according to Python's csv module standards, and missing keys in records result in empty cells.",
+      "done": false
+    },
+    {
+      "id": 2,
+      "title": "Implement Markdown writer module with table formatting and pipe escaping",
+      "files": [
+        "exporter/formats/md_fmt.py"
+      ],
+      "test": "tests/test_formats.py checks that markdown output is a valid table, pipe characters `|` within values are escaped as `\\|`, and missing keys result in empty cells.",
+      "done": false
+    },
+    {
+      "id": 3,
+      "title": "Register CSV and Markdown formats in the format registry",
+      "files": [
+        "exporter/formats/__init__.py"
+      ],
+      "test": "tests/test_formats.py checks that `formats.names()` includes 'csv' and 'md' and `formats.get()` returns the correct writer functions for them.",
+      "done": false
+    },
+    {
+      "id": 4,
+      "title": "Add --fields CLI option to filter and order columns",
+      "files": [
+        "exporter/cli.py"
+      ],
+      "test": "tests/test_cli.py checks that `--fields a,b,c` restricts output to only those columns in the specified order for csv, md, json, and text formats.",
+      "done": false
+    },
+    {
+      "id": 5,
+      "title": "Add --list-formats CLI option to display available formats",
+      "files": [
+        "exporter/cli.py"
+      ],
+      "test": "tests/test_cli.py checks that `--list-formats` outputs a list including 'csv' and 'md' alongside existing formats.",
+      "done": false
+    },
+    {
+      "id": 6,
+      "title": "Ensure default output is stdout when no path is provided",
+      "files": [
+        "exporter/cli.py"
+      ],
+      "test": "tests/test_cli.py checks that when no output path is provided, the formatted data is written to stdout rather than a file.",
+      "done": false
+    }
+  ]
+}

@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { repoFiles } from "./outline.ts";
+import { jsTopLevel } from "./strip.ts";
 
 export const HITS_CHARS = 5200;
 export const OUTLINE_CHARS = 2800;
@@ -15,7 +16,8 @@ const STOP = new Set(
     "defined define called call value values").split(" "),
 );
 
-export function trackedFiles(cwd: string): string[] {
+/** `git ls-files`; outside git, repoFiles with `langs` (config languages). */
+export function trackedFiles(cwd: string, langs: readonly string[] = ["py"]): string[] {
   try {
     const out = execFileSync("git", ["ls-files"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
     const files = out.split("\n").filter(Boolean);
@@ -23,10 +25,11 @@ export function trackedFiles(cwd: string): string[] {
   } catch {
     // not a git repo, or git missing
   }
-  return repoFiles(cwd);
+  return repoFiles(cwd, langs);
 }
 
-function readText(path: string): string | null {
+/** A text file under 400 KB, or null (binary, larger, unreadable): what `find` searches, and what /research quotes. */
+export function readText(path: string): string | null {
   try {
     if (statSync(path).size > 400_000) return null;
     const buf = readFileSync(path);
@@ -54,21 +57,29 @@ export interface Evidence {
   hits: string;
 }
 
+/** JS/TS files whose definitions come from strip.ts jsTopLevel when "ts" is on */
+const JS_DEFS = /\.(?:ts|mts|cts|js|mjs|cjs)$/;
+
 export function evidence(
   cwd: string,
   question: string,
-  caps: { hitsCap?: number; outlineCap?: number } = {},
+  caps: { hitsCap?: number; outlineCap?: number; langs?: readonly string[] } = {},
 ): Evidence {
+  const ts = caps.langs?.includes("ts") ?? false;
   const hitsCap = caps.hitsCap ?? HITS_CHARS;
   const outlineCap = caps.outlineCap ?? OUTLINE_CHARS;
   const kws = keywords(question);
   const outlineLines: string[] = [];
   const scored: { score: number; line: string }[] = [];
-  for (const f of trackedFiles(cwd)) {
+  for (const f of trackedFiles(cwd, caps.langs)) {
     const text = readText(join(cwd, f));
     if (text === null) continue;
     const lines = text.split("\n");
-    if (/\.(py|js|ts)$/.test(f)) {
+    if (ts && JS_DEFS.test(f)) {
+      // with "ts": top-level names and methods from the symbol reader (design languages-and-oracles §4), not the line regex
+      const defs = jsTopLevel(text).filter((x) => x.kind !== "module").map((x) => x.name);
+      outlineLines.push(`${f}: ${defs.join(", ") || "-"}`);
+    } else if (/\.(py|js|ts)$/.test(f)) {
       const defs: string[] = [];
       for (const l of lines) {
         const m = l.match(/^(?:def|class|function|async def)\s+([A-Za-z_]\w*)/);

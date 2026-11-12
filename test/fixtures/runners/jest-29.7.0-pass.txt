@@ -1,0 +1,10 @@
+PASS ./math.test.js
+  math
+    ✓ adds two numbers (4 ms)
+    ✓ multiplies two numbers (1 ms)
+
+Test Suites: 1 passed, 1 total
+Tests:       2 passed, 2 total
+Snapshots:   0 total
+Time:        0.69 s, estimated 1 s
+Ran all test suites.

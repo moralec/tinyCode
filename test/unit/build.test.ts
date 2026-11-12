@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { tmpDir } from "./tmpdir.ts";
 import { mergeConfig } from "../../src/config.ts";
 import type { ChatResult, Message } from "../../src/llm.ts";
-import { loadPlan, orchestratorContext, parseBuildArgs, runBuild, testFileFor, type BuildPlan } from "../../src/workflows/build.ts";
+import { blockedHandoff, buildRemaining, loadPlan, orchestratorContext, parseBuildArgs, runBuild, testFileFor, type BuildPlan } from "../../src/workflows/build.ts";
 import type { PiHandoff } from "../../src/workflows/fix.ts";
 
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -207,4 +207,56 @@ test("commit stages only the task's changed files, adds a cache .gitignore, neve
   assert.ok(files.includes("calc.py") && files.includes(".gitignore"));
   assert.ok(readFileSync(join(p.cwd, ".gitignore"), "utf8").includes("__pycache__/"));
   assert.ok(files.includes("unrelated.txt"), "no commits yet: everything is the build's");
+});
+
+test("testFileFor: with \"ts\" on, the default follows the project's runner; otherwise tests/test_task<id>.py", () => {
+  const task = (files: string[]) => ({ id: 3, title: "t", files, test: "it works", done: false });
+  const proj = (script: string, extra: Record<string, string> = {}) => {
+    const d = tmpDir("build-tf-");
+    writeFileSync(join(d, "package.json"), JSON.stringify({ scripts: { test: script } }));
+    for (const [p, t] of Object.entries(extra)) {
+      mkdirSync(join(d, p, ".."), { recursive: true });
+      writeFileSync(join(d, p), t);
+    }
+    return d;
+  };
+  const jest = proj("jest", { "node_modules/.bin/jest": "", "src/x": "" });
+  assert.equal(testFileFor(task(["src/cart.js"]), jest, ["py", "ts"]), "src/cart.test.js");
+  assert.equal(testFileFor(task(["src/cart.ts"]), jest, ["py", "ts"]), "src/cart.test.ts");
+  const vitestTs = proj("vitest run", { "node_modules/.bin/vitest": "", "tsconfig.json": "{}" });
+  assert.equal(testFileFor(task(["cart.js"]), vitestTs, ["py", "ts"]), "cart.test.ts", "tsconfig.json, no src/");
+  const node = proj("node --test");
+  assert.equal(testFileFor(task(["lib/slug.js"]), node, ["py", "ts"]), "test/slug.test.js");
+  assert.equal(testFileFor(task(["src/cart.ts"]), jest), "tests/test_task3.py", "\"ts\" off: as before");
+  assert.equal(testFileFor(task(["a.py"]), jest, ["py", "ts"]), "tests/test_task3.py");
+});
+
+test("tool run (plan-build-fit item 0): a blocked task returns the ladder's hand-off text, as fix does; nothing when not blocked", async () => {
+  const p = project();
+  const s = scripted([T1, pick, C2bad, review, C2bad]);
+  let stored: string | null = null;
+  // the tool run's inline hand-off: rung 3 cannot start Pi's loop, it only keeps the text (index.ts inlineHandoff)
+  const pi = async (h: PiHandoff) => {
+    stored = h.text;
+    return { turns: 0 };
+  };
+  const r = await runBuild({ task: 1, yes: false }, deps(p, s.chat, { pi }));
+  assert.equal(r.blocked, 1);
+  assert.ok(stored);
+  const h = blockedHandoff(r.blocked, stored);
+  assert.ok(h);
+  assert.match(h.extra, /^Task 1 blocked; edits undone\. Continue by hand: read, edit, run_tests\. /);
+  assert.match(h.extra, /sub returns a sum/);
+  assert.match(h.extra, /Then call build for the next task\.$/);
+  assert.equal(h.reason, "task 1 blocked; edits undone");
+  assert.equal(blockedHandoff(null, stored), null);
+  assert.equal(blockedHandoff(1, null), null);
+});
+
+test("buildRemaining: a build call that leaves tasks undone says so (no 'Report to user, stop' after 1/9)", () => {
+  const base = { ran: [], contextChars: [], committing: false };
+  assert.equal(buildRemaining({ ...base, blocked: null, done: 1, total: 9 }), "8 task(s) left: call build to continue");
+  assert.equal(buildRemaining({ ...base, blocked: null, done: 9, total: 9 }), undefined);
+  assert.equal(buildRemaining({ ...base, blocked: 2, done: 1, total: 9 }), undefined, "blocked has its own outcome");
+  assert.equal(buildRemaining({ ...base, blocked: null, done: 0, total: 0 }), undefined);
 });

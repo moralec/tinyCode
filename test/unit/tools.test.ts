@@ -6,6 +6,8 @@ import { tmpDir } from "./tmpdir.ts";
 import { approxTokens, MEMORY_PROMPT, Todo, tailText, withTail } from "../../src/limits.ts";
 import { INTERCEPTABLE } from "../../src/config.ts";
 import { buildIndex, heuristic } from "../../src/router.ts";
+import { LOOP_TOOL_NAMES } from "../../src/limits.ts";
+import { SHELL_TOOLS } from "../../src/tools.ts";
 import { entersRawWork, LOOP_TOOLS, ToolDiet, toolSet, todoFirst, statusLine, INTENT_DESCRIPTION, intentOf, compact, forTool, hintFor, isWorkflowTool, RAW_TOOLS, SPECS, TOOLS_FIRST_PROMPT, ToolsFirst, TOOL_FOR, toolResult, WORKFLOW_TOOLS, workflowTools } from "../../src/tools.ts";
 
 type Exec = (id: string, params: unknown, signal: undefined, onUpdate: undefined, ctx: unknown) => Promise<{ content: { type: string; text: string }[]; details: { ok: boolean } }>;
@@ -510,6 +512,81 @@ test("the extension, undoWorse default (undoWorseFrom 2): a first break gets the
   assert.equal(readFileSync(join(cwd, "bowling.py"), "utf8"), "v1\n");
 });
 
+test("the extension, E22 (startOver): the .start snapshot before the first write; the same failure 3 runs offers to=start, which puts the original source back and leaves the tests", async () => {
+  const cwd = repo();
+  writeFileSync(join(cwd, "cfg.json"), JSON.stringify({ test: { command: "cat out.txt; false" }, limits: { startOver: true, undoWorse: false, stuckTestRuns: 0 } }));
+  writeFileSync(join(cwd, "bowling.py"), "v1\n");
+  writeFileSync(join(cwd, "test_bowling.py"), "t1\n");
+  writeFileSync(join(cwd, "out.txt"), "FAILED t::a - x\n3 failed, 7 passed in 0.1s\n");
+  const log = join(tmpDir("tc-e22-log-"), "calls.jsonl");
+  const { handlers, tools } = await load({ TINYCODE_CONFIG: join(cwd, "cfg.json"), TINYCODE_LOG: log });
+  const ctx = { cwd, hasUI: false };
+  const run = (name: string, e: Record<string, unknown>) => (handlers.get(name) ?? []).map((h) => h(e, ctx));
+  await run("before_agent_start", { prompt: "make bowling pass", systemPrompt: "B" })[0];
+  const exec = (name: string, p: unknown = {}) => (tools.get(name) as unknown as { execute: Exec }).execute("id", p, undefined, undefined, ctx);
+  assert.equal((await exec("restore_best", { to: "start" })).content[0]!.text, "No start snapshot in this request.", "nothing changed yet: no snapshot");
+  run("tool_call", { toolName: "write", toolCallId: "w1", input: { path: "bowling.py", content: "v2\n" } });
+  writeFileSync(join(cwd, "bowling.py"), "v2 wrong design\n");
+  writeFileSync(join(cwd, "test_bowling.py"), "t2\n");
+  await exec("run_tests");
+  await exec("run_tests");
+  assert.match((await exec("run_tests")).content[0]!.text, /\nSame failure 3 runs \(7\/10\)\. The design may be wrong: restore_best to=start/);
+  assert.match((await exec("restore_best", { to: "start" })).content[0]!.text, /^Original files back \(tests kept; best tree 7\/10 saved\)/);
+  assert.equal(readFileSync(join(cwd, "bowling.py"), "utf8"), "v1\n", "the original source");
+  assert.equal(readFileSync(join(cwd, "test_bowling.py"), "utf8"), "t2\n", "tests neither rewritten nor removed");
+  const steps = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l).step);
+  assert.ok(steps.includes("start_over"));
+  // a new request: the old snapshot is never restored
+  await run("before_agent_start", { prompt: "and now something else", systemPrompt: "B" })[0];
+  assert.equal((await exec("restore_best", { to: "start" })).content[0]!.text, "No start snapshot in this request.");
+});
+
+test("the extension, loop guards 2 with every key off: a test command keeps no timeout, a long script runs, restore_best has no parameters, no offer; only shadow lines are logged", async () => {
+  const cwd = repo();
+  writeFileSync(join(cwd, "cfg.json"), JSON.stringify({ test: { command: "cat out.txt; false" }, limits: { undoWorse: false, stuckTestRuns: 0 } }));
+  writeFileSync(join(cwd, "bowling.py"), "v1\n");
+  writeFileSync(join(cwd, "out.txt"), "FAILED t::a - x\n3 failed, 7 passed in 0.1s\n");
+  const log = join(tmpDir("tc-lg2off-log-"), "calls.jsonl");
+  const { handlers, tools } = await load({ TINYCODE_CONFIG: join(cwd, "cfg.json"), TINYCODE_LOG: log });
+  const ctx = { cwd, hasUI: false, model: { id: "m", provider: "p", api: "a", contextWindow: 16384 }, getSystemPrompt: () => "S" };
+  const run = (name: string, e: Record<string, unknown>) => (handlers.get(name) ?? []).map((h) => h(e, ctx));
+  await run("before_agent_start", { prompt: "make bowling pass", systemPrompt: "B" })[0];
+  const tool = tools.get("restore_best") as unknown as { parameters: { properties: object } };
+  assert.deepEqual(Object.keys(tool.parameters.properties), []);
+  const bash = { command: "npm test" };
+  assert.equal(run("tool_call", { toolName: "bash", toolCallId: "b1", input: bash })[0], undefined);
+  assert.equal("timeout" in bash, false, "no timeout added");
+  const long = { command: Array.from({ length: 80 }, (_, i) => `echo ${i}`).join("\n") };
+  assert.equal(run("tool_call", { toolName: "bash", toolCallId: "b2", input: long })[0], undefined, "a long script runs");
+  const exec = (name: string, p: unknown = {}) => (tools.get(name) as unknown as { execute: Exec }).execute("id", p, undefined, undefined, ctx);
+  run("tool_call", { toolName: "write", toolCallId: "w1", input: { path: "bowling.py", content: "v2\n" } });
+  for (let i = 0; i < 4; i++) assert.doesNotMatch((await exec("run_tests")).content[0]!.text, /Same failure/);
+  const steps = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l).step);
+  const lg2 = steps.filter((s) => /long_action|start_over|test_|retire_plan|keeps_masks|fresh_serve/.test(s));
+  assert.ok(lg2.length >= 2, `shadow lines: ${lg2.join(",")}`);
+  assert.ok(lg2.every((s) => s.startsWith("would_")), "every key off: only would_ lines");
+});
+
 test("the diet keeps MCP tools", () => {
   assert.deepEqual(toolSet(["read", "fix", "mcp__web__web_fetch", "todo"], { diet: true, best: false }), ["read", "mcp__web__web_fetch", "todo"]);
+});
+
+test("statusLine check (design research-grounding): done carries the check; partial wins over it; no tool diet", () => {
+  const check = "Before reporting, compare the key fact with its quoted line; if it does not answer the question, read or find there.";
+  assert.equal(statusLine({ text: "x", ok: true, check }), `STATUS: done. ${check}`);
+  assert.equal(statusLine({ text: "x", ok: true, check, remaining: "no quoted fact; check by hand" }), "STATUS: partial — no quoted fact; check by hand");
+  assert.equal(statusLine({ text: "x", ok: true }), "STATUS: done. Report to user, stop.");
+  assert.equal(entersRawWork({ tool: "research", text: toolResult({ text: "answered", ok: true, check }).content[0]!.text }), false);
+});
+
+test("PowerShell is the shell everywhere (loop guards 2, no switch): kept in the diet, enters raw work, counts for the tools-first nudge, never a workflow result", () => {
+  assert.deepEqual([...SHELL_TOOLS], ["bash", "powershell"]);
+  const win = ["read", "powershell", "edit", "write", "find", "run_tests", "todo", ...WORKFLOW_TOOLS];
+  assert.deepEqual(toolSet(win, { diet: true, best: false }), ["read", "powershell", "edit", "write", "find", "run_tests", "todo"]);
+  assert.equal(entersRawWork({ call: "powershell" }), true);
+  assert.ok(RAW_TOOLS.has("powershell"));
+  assert.ok(LOOP_TOOL_NAMES.has("powershell"), "its latest result is not kept as a workflow result");
+  // Linux: the same list as before
+  const lin = ["read", "bash", "edit", "write", "find", "run_tests", "todo", ...WORKFLOW_TOOLS];
+  assert.deepEqual(toolSet(lin, { diet: true, best: false }), ["read", "bash", "edit", "write", "find", "run_tests", "todo"]);
 });

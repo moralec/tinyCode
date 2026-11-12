@@ -295,3 +295,41 @@ test("revert never deletes an existing file a block reached by path resolution (
   assert.equal(existsSync(join(cwd, "calc.py")), true, "calc.py survives");
   assert.equal(read(cwd, "calc.py"), CALC);
 });
+
+test("/test with \"ts\" on: a JS/TS target runs the project's check (no command); no check found ends broken, before any call", async () => {
+  const { cwd, env } = mk({ "package.json": JSON.stringify({ scripts: { test: "vitest run" } }), "src/sum.ts": "export function sum(a: number, b: number) {\n  return a + b;\n}\n" });
+  let chats = 0;
+  const lines: string[] = [];
+  const r = await runTestGen(parseTestArgs("--file src/sum.ts write tests for sum"), {
+    cwd,
+    config: mergeConfig({ test: { python: PY }, languages: ["py", "ts"] }),
+    chat: async () => {
+      chats++;
+      throw new Error("no call expected");
+    },
+    report: (l) => lines.push(l),
+    env,
+  });
+  assert.equal(chats, 0);
+  assert.equal(r.outcome, "broken");
+  assert.ok(lines.some((l) => /vitest is not installed/.test(l)), lines.join("\n"));
+  // with node_modules present, runs go through runTests with no command and the languages
+  // an existing test file: /test runs its baseline through runTests before writing anything
+  writeFileSync(join(cwd, "src", "sum.test.ts"), "import { test } from 'vitest';\ntest('x', () => {});\n");
+  mkdirSync(join(cwd, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(cwd, "node_modules", ".bin", "vitest"), "");
+  const seen: { config: { command: string | null }; langs?: readonly string[] }[] = [];
+  await runTestGen(parseTestArgs("--file src/sum.ts write tests for sum"), {
+    cwd,
+    config: mergeConfig({ test: { python: PY }, languages: ["py", "ts"] }),
+    chat: async () => ({ text: "", model: "m", usage: { prompt_tokens: 0, completion_tokens: 0 } }) as ChatResult,
+    report: () => {},
+    env,
+    runTests: async (o: { config: { command: string | null }; langs?: readonly string[] }) => {
+      seen.push(o);
+      return { ok: true, text: "PASS Tests  1 passed (1)", counts: { passed: 1, failed: 0 }, code: 0, timedOut: false };
+    },
+  } as never);
+  assert.ok(seen.length > 0, "the baseline ran");
+  assert.ok(seen.every((o) => o.config.command === null && o.langs?.includes("ts")), JSON.stringify(seen));
+});

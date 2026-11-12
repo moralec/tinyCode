@@ -159,7 +159,7 @@ export interface Gathered {
 }
 
 /** Callers: lines in other places that mention the symbol (or import the file). Callees: repo definitions called from the body. */
-export function gather(cwd: string, target: Target, question: string, cap = CONTEXT_CHARS): Gathered {
+export function gather(cwd: string, target: Target, question: string, cap = CONTEXT_CHARS, langs: readonly string[] = ["py"]): Gathered {
   const parts: string[] = [];
   let used = 0;
   const add = (title: string, body: string) => {
@@ -242,9 +242,9 @@ export function gather(cwd: string, target: Target, question: string, cap = CONT
   if (defs.length) add("More callees:", defs.join("\n"));
   if (used < cap / 2) {
     // thin context: scored hits for the question's keywords, and the repo outline as a last resort
-    const ev = evidence(cwd, question, { hitsCap: Math.max(0, Math.min(2500, cap - used)), outlineCap: 0 });
+    const ev = evidence(cwd, question, { hitsCap: Math.max(0, Math.min(2500, cap - used)), outlineCap: 0, langs });
     if (ev.hits !== "(no matching lines)") add("Other matching lines:", ev.hits.trimEnd());
-    if (!parts.length) add("Repository outline:", outline(cwd, Math.min(3000, cap - used)));
+    if (!parts.length) add("Repository outline:", outline(cwd, Math.min(3000, cap - used), langs));
   }
   return { target, text: parts.join("\n\n"), chars: used };
 }
@@ -340,7 +340,7 @@ export async function runExplain(args: ExplainArgs, deps: ExplainDeps): Promise<
     say(`/explain: no file or symbol found for ${JSON.stringify(question.slice(0, 60))}; name a file or a function (or use --file PATH)`);
     return none();
   }
-  const g = gather(cwd, target, question);
+  const g = gather(cwd, target, question, undefined, deps.config.languages);
   say(`target: ${target.file}${target.line ? `:${target.line}` : ""}${target.symbol ? ` (${target.symbol})` : ""}`);
   const messages: Message[] = [
     { role: "system", content: EXPLAIN_RULES },

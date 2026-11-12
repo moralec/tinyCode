@@ -79,3 +79,54 @@ test("strictRoles (C20, D5): Mistral-family ids by default; a list of non-empty 
   for (const bad of ["mistral", [""], [3]])
     assert.throws(() => mergeConfig({ strictRoles: bad }), (e: Error) => e instanceof ConfigError && e.message.includes("strictRoles"));
 });
+
+test("languages: default [\"py\",\"ts\"] (gate passed, D8); [\"py\"] turns ts off; an unknown entry or a missing \"py\" is an error", () => {
+  assert.deepEqual(DEFAULTS.languages, ["py", "ts"]);
+  assert.deepEqual(mergeConfig({ languages: ["py"] }).languages, ["py"]);
+  assert.throws(() => mergeConfig({ languages: ["py", "go"] }), (e: unknown) => e instanceof ConfigError && /languages/.test((e as Error).message));
+  assert.throws(() => mergeConfig({ languages: ["ts"] }), /includes "py"/);
+  assert.throws(() => mergeConfig({ languages: "py" }), /languages/);
+});
+
+test("research.localFirst and research.grounded (design research-grounding): booleans, off by default", () => {
+  assert.equal(DEFAULTS.research.localFirst, false);
+  assert.equal(DEFAULTS.research.grounded, false);
+  assert.throws(() => mergeConfig({ research: { localFirst: "yes" } }), (e: Error) => e instanceof ConfigError && /research\.localFirst: must be true or false/.test(e.message));
+  assert.throws(() => mergeConfig({ research: { grounded: 1 } }), (e: Error) => e instanceof ConfigError && /research\.grounded: must be true or false/.test(e.message));
+  const c = mergeConfig({ research: { localFirst: true, grounded: true } });
+  assert.equal(c.research.localFirst, true);
+  assert.equal(c.research.grounded, true);
+});
+
+test("stages (plan-build-fit E21a, E21b, E25): planReview on by default (E21a accepted 2026-11-12), the rest off; validated with the key named", () => {
+  const c = mergeConfig({});
+  assert.deepEqual(c.stages, { planReview: true, buildChecks: false, planReadChars: 8000, wholeCheck: false });
+  assert.throws(() => mergeConfig({ stages: { planReview: "yes" } }), (e: Error) => e instanceof ConfigError && e.message.includes("stages.planReview"));
+  assert.throws(() => mergeConfig({ stages: { buildChecks: "yes" } }), (e: Error) => e instanceof ConfigError && e.message.includes("stages.buildChecks"));
+  assert.throws(() => mergeConfig({ stages: { buildChecks: 1 } }), /stages\.buildChecks: must be true or false/);
+  assert.equal(mergeConfig({ stages: { buildChecks: true } }).stages.buildChecks, true);
+  assert.equal(mergeConfig({ stages: { buildChecks: true } }).stages.planReview, true, "one switch does not change the other: planReview stays at its default");
+  assert.equal(mergeConfig({ stages: { planReview: false, buildChecks: true } }).stages.planReview, false);
+  assert.throws(() => mergeConfig({ stages: { wholeCheck: 1 } }), (e: Error) => e instanceof ConfigError && e.message.includes("stages.wholeCheck"));
+  assert.throws(() => mergeConfig({ stages: { planReadChars: 999 } }), (e: Error) => e instanceof ConfigError && e.message.includes("stages.planReadChars"));
+  assert.throws(() => mergeConfig({ stages: { planReadChars: 1500.5 } }), /stages\.planReadChars/);
+  assert.equal(mergeConfig({ stages: { planReview: true, planReadChars: 1000, wholeCheck: true } }).stages.planReadChars, 1000);
+});
+
+test("loop guards 2: every key off by default and validated", () => {
+  const bools = ["stepBackKeepsMasks", "retirePlan", "startOver"] as const;
+  for (const k of bools) {
+    assert.equal(DEFAULTS.limits[k], false, `${k} off`);
+    assert.equal(mergeConfig({ limits: { [k]: true } }).limits[k], true);
+    assert.throws(() => mergeConfig({ limits: { [k]: 1 } }), new RegExp(`limits\\.${k}`));
+  }
+  const ints = ["freshServeLines", "bashTestSeconds", "bashMaxLines", "writeMaxLines"] as const;
+  for (const k of ints) {
+    assert.equal(DEFAULTS.limits[k], 0, `${k} off`);
+    assert.equal(mergeConfig({ limits: { [k]: 150 } }).limits[k], 150);
+    for (const bad of [-1, 1.5, "40", null]) assert.throws(() => mergeConfig({ limits: { [k]: bad } }), new RegExp(`limits\\.${k}`));
+  }
+  assert.equal(DEFAULTS.limits.testTimeScale, 0);
+  assert.equal(mergeConfig({ limits: { testTimeScale: 2.5 } }).limits.testTimeScale, 2.5);
+  for (const bad of [-1, "10", null, Infinity]) assert.throws(() => mergeConfig({ limits: { testTimeScale: bad } }), /limits\.testTimeScale/);
+});
