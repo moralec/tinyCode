@@ -1,0 +1,81 @@
+# Results
+
+These are the published results of v1.0: five public Python exercises, plain Pi against Pi + tinyCode. The new 54-task benchmark gets its first full baseline next, and its numbers will replace this page. For stories of single runs see [See the difference](guide/pi-vs-tinycode.md).
+
+We ran the same five coding tasks with plain Pi and with Pi + tinyCode on three tested setups: each a card with a
+model that fits it, a **16k context window**, three unattended runs per task and side, and a 10-minute cap per run.
+**The runs are still in progress**: a `·` marks a run not done yet, and the tables are updated as they finish.
+
+| Card | Model (why we picked it) | Pi alone | Pi + tinyCode |
+|---|---|---|---|
+| 16 GB (Tesla T4) | gpt-oss-20b (best coder that fits) | 3 of 15 | **8 of 15** |
+| 16 GB (Tesla T4) | Qwen3.6-35B-A3B (popular reference) | 4 of 15 | **10 of 15** |
+| 16 GB (Tesla T4) | Nemotron-Nano-9B-v2 (best coder for 8 GB cards; run here for speed) | 0 of 1 | **0 of 0** |
+
+In the tables below each mark is one run, in order: ✓ pass with its time in seconds, ✗ fail, · not run yet.
+
+## 16 GB · gpt-oss-20b
+
+Tesla T4, MXFP4, 12.1 GB, 16k window, 16-bit cache. Fast: about 50 tokens/s on the T4. In some runs with plain Pi it wrote the solution and stopped without running the tests; tinyCode's fix workflow runs them and keeps going. bowling stayed out of reach for both.
+
+| Task | What (tests) | Pi alone | Pi + tinyCode |
+|---|---|---|---|
+| [connect](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/connect) | Hex game winner (10) | ✗ ✗ ✓26 | ✓72 ✓30 ✓28 |
+| [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | bowling scorer (31) | ✗ ✗ ✗ | ✗ ✗ ✗ |
+| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | ✓64 ✓52 ✗ | ✓44 ✓50 ✓60 |
+| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | ✗ ✗ ✗ | ✗ ✓152 ✗ |
+| [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | ✗ ✗ ✗ | ✓154 ✗ ✗ |
+| **Total** | solved (median s) | **3 of 15** (52 s) | **8 of 15** (55 s) |
+
+## 16 GB · Qwen3.6-35B-A3B
+
+Tesla T4, UD-IQ3_XXS, 13.2 GB, 16k window, 16-bit cache. Talkative: on connect, plain Pi's own explanations filled the 16k window (up to 3.6k tokens in one reply). tinyCode passed connect and dot-dsl in every run; on paasio both pass every run, and plain Pi is four to six times faster.
+
+| Task | What (tests) | Pi alone | Pi + tinyCode |
+|---|---|---|---|
+| [connect](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/connect) | Hex game winner (10) | ✗ ✗ ✗ | ✓30 ✓76 ✓260 |
+| [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | bowling scorer (31) | ✗ ✗ ✗ | ✗ ✗ ✓327 |
+| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | ✓76 ✗ ✗ | ✓198 ✓36 ✓70 |
+| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | ✓46 ✓64 ✓48 | ✓204 ✓298 ✓377 |
+| [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | ✗ ✗ ✗ | ✗ ✗ ✗ |
+| **Total** | solved (median s) | **4 of 15** (56 s) | **10 of 15** (201 s) |
+
+## 16 GB · Nemotron-Nano-9B-v2
+
+Tesla T4, Q4_K_M, 6.5 GB, 16k window, 16-bit cache. An 8 GB-class model, run on the 16 GB card for speed; the test on an 8 GB card follows when our new card arrives. On the slower 8 GB card it ran out the clock: with plain Pi it often asked for the files instead of reading them (counted below), and with tinyCode most of its edits failed to match the file exactly.
+
+| Task | What (tests) | Pi alone | Pi + tinyCode |
+|---|---|---|---|
+| [connect](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/connect) | Hex game winner (10) | ✗ · · | · · · |
+| [bowling](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/bowling) | bowling scorer (31) | · · · | · · · |
+| [dot-dsl](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/dot-dsl) | graph-building DSL (12) | · · · | · · · |
+| [paasio](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/paasio) | I/O byte counters (25) | · · · | · · · |
+| [sgf-parsing](https://github.com/Aider-AI/polyglot-benchmark/tree/main/python/exercises/practice/sgf-parsing) | Go game-record parser (23) | · · · | · · · |
+| **Total** | solved (median s) | **0 of 1** (–) | **0 of 0** (–) |
+
+Runs that stopped to ask a question instead of acting (they count as fails): Pi alone 1 of 1, Pi + tinyCode 0 of 0.
+
+**How we picked the models.** For each card, the best coder in our model list that fits it, by public coding scores
+with thinking off: gpt-oss-20b (16 GB) and Nemotron-Nano-9B-v2 (8 GB). Qwen3.6-35B-A3B is there as a widely used
+reference. On 8 GB we also tried gemma-4-12B and Qwen3.5-4B; tinyCode did not help them in our runs.
+
+**The tasks.** Five Python exercises from Aider's polyglot benchmark, each "write the implementation from an empty stub
+so the given tests pass". They are the ones where plain Pi needed more than 14k of context when it had 32k.
+
+**Why unattended runs.** Each run is one request with its tests and no follow-up, which is how a larger cloud agent
+would hand a job to a local model: a clear task, a test that defines "done", and nobody to answer questions. A run that
+stops to ask counts as a fail. This is the use case on our [roadmap](../ROADMAP.md) (v1.3, local delegate).
+
+What the runs show so far:
+
+- **Where plain Pi runs out of room, tinyCode finishes.** connect is the clearest case: on both 16 GB models plain Pi
+  fails it in most runs, while tinyCode has passed every run so far.
+- **When both finish, plain Pi is often faster** (paasio on Qwen3.6: about 50 s against 200 to 380 s), though not always
+  (dot-dsl on gpt-oss).
+- **Some tasks stay hard for both** at this size: bowling and sgf-parsing.
+- **Small models on 8 GB are not there yet.** In the first runs, Nemotron with plain Pi asked for the files instead of
+  reading them, and with tinyCode it struggled with exact-text edits.
+
+Method and every run (tests, time, calls, peak context, generated tokens): [bench/RESULTS.md](../bench/RESULTS.md).
+
+**Back to the [README](../README.md).**

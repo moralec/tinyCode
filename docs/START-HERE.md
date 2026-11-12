@@ -31,6 +31,9 @@ Make sure you have:
 ## Additional resources
 
 - [README](../README.md): how it works, the results, and the known issues.
+- [Capabilities](capabilities.md): every mechanism with its status and evidence ([PDF](capabilities.pdf)).
+- [Results](results.md): every published run, per model.
+- [CHANGELOG.md](../CHANGELOG.md): what changed in each release.
 - [Releases](https://github.com/moralec/tinyCode/releases): notes, plus a PDF of every feature and its status.
 - [ROADMAP.md](../ROADMAP.md): what comes next.
 
