@@ -22,7 +22,8 @@ What the installer does:
 - creates a `pi` command;
 - links tinyCode into Pi, and checks that your server answers.
 
-Nothing is installed globally. **Open a new terminal afterwards.** On Windows, see [WINDOWS.md](../WINDOWS.md).
+Nothing is installed globally. **Open a new terminal afterwards.** On Windows, see [Windows](windows.md). Which model to
+run: see [Models](models.md).
 
 ### Troubleshooting installation
 
@@ -47,4 +48,4 @@ Type `/tinycode` to see the settings in effect. Then work as you normally would.
 
 ## Ready to learn more?
 
-**[See the difference](pi-vs-tinycode.md)**: the same task with plain Pi and with tinyCode.
+**[See the difference](pi-vs-tinycode.md)**: six real tasks, with what plain Pi and tinyCode each did.

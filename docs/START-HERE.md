@@ -23,10 +23,10 @@ Make sure you have:
 
 ## Guide contents
 
-1. **[Getting started](guide/getting-started.md):** install, check it works, first run.
-2. **[See the difference](guide/pi-vs-tinycode.md):** the same task with plain Pi and with tinyCode.
-3. **[Models](../README.md#models):** which model to run on your card.
-4. **[Windows](WINDOWS.md):** setup notes (untested so far).
+1. **[Models](guide/models.md):** which model to run on your hardware, and how to start it.
+2. **[Getting started](guide/getting-started.md):** install, check it works, first run.
+3. **[Windows](guide/windows.md):** installing on Windows (untested so far).
+4. **[See the difference](guide/pi-vs-tinycode.md):** six real tasks, with what plain Pi and tinyCode each did.
 
 ## Additional resources
 
@@ -36,4 +36,4 @@ Make sure you have:
 
 ## Ready to go?
 
-Head to **[Getting started](guide/getting-started.md)**.
+Pick your model on **[Models](guide/models.md)**, then head to **[Getting started](guide/getting-started.md)**.
