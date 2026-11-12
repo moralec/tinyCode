@@ -2,9 +2,11 @@
 
 <h1 align="center">tinyCode</h1>
 
-<p align="center">A <a href="https://github.com/earendil-works/pi">Pi</a> extension that keeps the context small, so local models finish coding tasks in a 16k window where plain Pi runs out of room.</p>
+<p align="center">A <a href="https://github.com/earendil-works/pi">Pi</a> extension that keeps the context small, so local models finish coding tasks in a 16k window where plain Pi runs out of room (on a 16 GB card today; 8 GB cards are not there yet).</p>
 
 > **Preview — v1.1.0.** Works, but rough edges remain; see [Known issues](#known-issues-v110). Feedback welcome via GitHub issues.
+>
+> **New here? [Start here](docs/START-HERE.md):** install, first run, and the same task with plain Pi and with tinyCode.
 
 ## Why
 
