@@ -7,8 +7,12 @@ Pi and with tinyCode so you can see the difference yourself.
 
 ## 1. What you need
 
-- **A GPU with 16 GB of memory**, and a model that fits it with room for a 16k window. Our tested picks are
-  gpt-oss-20b (faster) and Qwen3.6-35B-A3B (solves the most). The README's Models section has the exact files.
+- **A GPU with 16 GB of memory, or a machine with unified memory (Apple Silicon, AMD Strix Halo) with 24 GB or
+  more**, so the model and a 16k window fit. Our tested models need about 12-13 GB for the model itself. On unified
+  memory the system shares that memory, and macOS limits how much of it the GPU may use, so 16 GB of unified memory
+  is not enough. Our results come from a 16 GB card; we have not tested unified memory.
+- **Our tested models:** gpt-oss-20b (faster) and Qwen3.6-35B-A3B (solves the most). The README's Models section has
+  the exact files.
 - **8 GB cards are not there yet.** The models that fit 8 GB (for example Nemotron-Nano-9B-v2, gemma-4-12B) were
   not helped by tinyCode in our runs. The memory left for context is often about 8k, and Pi reserves 4k of that for
   the reply.
