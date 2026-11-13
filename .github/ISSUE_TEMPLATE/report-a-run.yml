@@ -1,0 +1,70 @@
+name: Report a run
+description: You tried tinyCode on a task. Tell us what happened, good or bad.
+title: "Run: <task in a few words>"
+labels: ["run report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying tinyCode. A report is useful whether it went well or badly: it shows where tinyCode helps and where it doesn't.
+  - type: input
+    id: card
+    attributes:
+      label: Card or device
+      placeholder: e.g. RTX 4060 Ti 16 GB, M2 Pro 32 GB
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model and quantisation
+      placeholder: e.g. Qwen3.6-35B-A3B Q4_K_M
+    validations:
+      required: true
+  - type: input
+    id: window
+    attributes:
+      label: Context window
+      placeholder: e.g. 16384
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: tinyCode and Pi versions
+      description: "The tinyCode release or git commit you installed, and what `pi --version` prints."
+      placeholder: e.g. tinyCode 1.1.0, Pi 1.4.2
+  - type: textarea
+    id: task
+    attributes:
+      label: The task
+      description: What you asked, in your own words, and what kind of project it was.
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: How did it go?
+      options:
+        - Finished, and the result was right
+        - Finished, but the result was wrong
+        - Ran out of room or hit a limit
+        - Got stuck or looped
+        - It broke (error or crash)
+    validations:
+      required: true
+  - type: dropdown
+    id: compared
+    attributes:
+      label: Did you also try plain Pi (`pi --no-extensions`) on the same task?
+      options:
+        - "No"
+        - Yes, and plain Pi did better
+        - Yes, and tinyCode did better
+        - Yes, about the same
+  - type: textarea
+    id: details
+    attributes:
+      label: What happened
+      description: What went well or badly. Paste the log or the end of the session if you have it; remove anything private.
+      render: text

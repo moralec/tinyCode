@@ -4,7 +4,7 @@
 
 <p align="center">A <a href="https://github.com/earendil-works/pi">Pi</a> extension that keeps the context small, so local models finish coding tasks in a 16k window where plain Pi runs out of room.</p>
 
-> **Preview — v1.1.0.** Works, but rough edges remain; see [Known issues](#known-issues-v110). Feedback welcome via GitHub issues.
+> **Preview — v1.1.0.** Works, but rough edges remain; see [Known issues](#known-issues-v110). Tried it? [Report a run](https://github.com/moralec/tinyCode/issues/new?template=report-a-run.yml): your card, model, window and what happened, good or bad.
 >
 > **New here? [Start here](docs/START-HERE.md):** install, first run, and the same task with plain Pi and with tinyCode.
 
@@ -14,6 +14,18 @@ On a local GPU the context window is the real limit. The KV cache grows with it 
 memory, so a 16 GB card running a good model often has 16k of context to spare, not 128k. Coding agents fill that
 window fast: every file read, test run and edit stays in the conversation and is sent again on every call. At 16k,
 plain Pi regularly stops mid-task with the window full.
+
+## Is it for you?
+
+**It helps most when the window is the limit:** a 16k window, a mid-size model (tested: gpt-oss-20b and
+Qwen3.6-35B-A3B), and a task with a failing test to fix.
+
+**Where it doesn't help, yet:**
+- On tasks that fit easily in the window, plain Pi is faster. tinyCode adds steps that only pay off when room is short.
+- Small models on 8 GB cards don't benefit yet.
+- Runs vary: the same task can pass in 30 s on one run and hit the 10-minute cap on the next.
+- `/build` finishes only the first task of a plan on its own, and some requests go to the wrong workflow. The full
+  list is in [Known issues](#known-issues-v110).
 
 ## What
 
@@ -36,19 +48,20 @@ they were not better than plain Pi.
 
 ## What tinyCode does: eight capabilities
 
-1. **Every call fits the window.** Code builds each call's context, and old tool output is masked rather than kept.
-   Plain Pi ran out of window 8 times in our last two rounds; tinyCode never did.
-2. **Fast on your machine.** The prompt and tool list stay stable, so the server reuses what it has already read, and
-   long runs don't slow down with every call.
-3. **Takes the shortest path.** Say what you want in plain words; tinyCode picks the workflow and tries the cheapest
-   fix first. On connect it finished in 30 s where plain Pi ran out of room.
-4. **Edits that land.** Edits that are slightly off still apply, and a repeated marker line is read once.
-5. **Never loses your best work.** You end with the best version tinyCode reached, not the last one.
-6. **Checks by running, not by believing.** "Fixed" means a failing test now passes, run by code, in Python and in
-   TypeScript/JavaScript.
-7. **Gets unstuck.** When a run stops improving, tinyCode changes course instead of repeating itself.
-8. **From idea to app.** `/plan` reads the files it will change before the plan is final: 12 of 15 good plans against
-   9 of 15.
+1. **Every call fits the window.** It doesn't run out of room: each call is put together for the step at hand and old
+   tool output is dropped. Plain Pi ran out of window 8 times in our last two rounds; tinyCode never did.
+2. **Fast on your machine.** It doesn't slow down as the run gets longer: the start of the prompt stays the same
+   between calls, so your server reuses what it has already read.
+3. **Takes the shortest path.** You don't have to pick a mode: say what you want in plain words, and it chooses the
+   workflow and tries the cheapest fix first. On connect it finished in 30 s where plain Pi ran out of room.
+4. **Edits that land.** An edit that is slightly off still applies, instead of failing and costing another round.
+5. **Never loses your best work.** If a run gets worse towards the end, you keep the best version it reached.
+6. **Checks by running, not by believing.** "Fixed" means fixed: it runs the tests itself, in Python and
+   TypeScript/JavaScript, and only reports a fix when a failing test now passes.
+7. **Gets unstuck.** It doesn't go round in circles: when a run stops improving, it changes approach instead of
+   repeating itself.
+8. **From idea to app.** Plans start from the code: `/plan` reads the files it will change before the plan is final,
+   so plans are less likely to miss the file that needs the edit. 12 of 15 good plans, against 9 of 15.
 
 Every mechanism behind these, with its status and evidence: [capabilities](docs/capabilities.md) (also as a
 [PDF](docs/capabilities.pdf)).
@@ -107,6 +120,12 @@ in [CHANGELOG.md](CHANGELOG.md).
 5. `install.ps1` is untested on real Windows.
 6. The results above are from v1.0 ([docs/results.md](docs/results.md)). A full baseline of plain Pi against tinyCode on the new
    49-task benchmark comes next.
+
+## Tried it?
+
+Try it on a real task in your own project, then [report the run](https://github.com/moralec/tinyCode/issues/new?template=report-a-run.yml):
+your card, model and window, the task, and what happened, good or bad. Those reports decide what gets worked on next.
+Questions and ideas go to [Discussions](https://github.com/moralec/tinyCode/discussions).
 
 ## Licence
 
