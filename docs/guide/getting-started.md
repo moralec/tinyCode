@@ -25,6 +25,21 @@ What the installer does:
 Nothing is installed globally. **Open a new terminal afterwards.** On Windows, see [Windows](windows.md). Which model to
 run: see [Models](models.md).
 
+### Already have Pi?
+
+Install tinyCode as a Pi package instead:
+
+```
+pi install npm:@moralec/tinycode
+```
+
+It expects the server at `http://127.0.0.1:8080/v1` with the model `tinycode-model`. If your window is 16k, tell it in
+`~/.config/tinycode/config.json`:
+
+```json
+{ "lanes": { "trunk": { "contextWindow": 16384 }, "small": { "contextWindow": 16384 } } }
+```
+
 ### Troubleshooting installation
 
 1. Check that the server answers: `curl http://127.0.0.1:8080/v1/models`.

@@ -81,6 +81,9 @@ git clone https://github.com/moralec/tinyCode && cd tinyCode
 sh install.sh --trunk-context 16384 --small-context 16384
 ```
 
+Already use Pi? `pi install npm:@moralec/tinycode` ([Getting started](docs/guide/getting-started.md#already-have-pi)
+has the one setting to add).
+
 **New here? [Start here](docs/START-HERE.md):** which model to run, starting the server, Windows, a first run, and the
 same task with and without tinyCode.
 
