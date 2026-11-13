@@ -8,6 +8,8 @@ The notes for each release, newest first. Downloads and the capabilities PDF are
 A release built around measurement: each change was run against plain Pi on the same local model, and switched on
 only where the numbers said so.
 
+**Install:** now on npm as `@moralec/tinycode`; in Pi, run `pi install npm:@moralec/tinycode`.
+
 **Upgrading:**
 - `/plan` now reviews its plan by default (`stages.planReview: true`). Set it to `false` for the old behaviour.
 - The `acceptance` config block is removed. A config that still sets it is refused with a message: delete the block.
